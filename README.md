@@ -1,0 +1,1 @@
+# Trading-Daily-Update-Discord-Bot
