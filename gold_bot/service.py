@@ -2,12 +2,12 @@
 
 Two independent jobs run on every poll:
 
-* Daily report - fires when FXCM's feed shows a NEW daily candle (the newest D1
+* Daily report - fires when the data feed shows a NEW daily candle (the newest D1
   candle is still forming and no report exists for its trading date). Confirmed
   bias uses only completed daily candles.
 * Session reports - fire once when the Asian / London / New York session opens
-  and the first FXCM m5 candle of the session exists (so the opening price is a
-  real FXCM price).
+  and the first m5 candle of the session exists (so the opening price is a
+  real market price).
 
 Each report key is claimed atomically in SQLite before sending, so a report is
 sent at most once even across restarts. A failed send releases the claim so the
@@ -83,7 +83,7 @@ class ReportService:
             try:
                 await job(now)
             except DataUnavailable as exc:
-                log.warning("%s skipped this cycle - FXCM data unavailable: %s", job.__name__, exc)
+                log.warning("%s skipped this cycle - market data unavailable: %s", job.__name__, exc)
             except Exception:  # noqa: BLE001
                 log.exception("%s failed", job.__name__)
 
@@ -92,7 +92,7 @@ class ReportService:
         daily = await self.provider.get_candles(Timeframe.D1, count=3)
         _, forming = split_completed(Timeframe.D1, daily, now)
         if forming is None:
-            return None  # no new FXCM daily candle has opened (e.g. weekend)
+            return None  # no new daily candle has opened (e.g. weekend)
         key = f"daily:{trading_date(forming.time).isoformat()}"
         if self.storage.report_status(key):
             return None
@@ -128,7 +128,7 @@ class ReportService:
             return None
         report = await self.builder.build_session(occurrence, now)
         if report.opening_price is None:
-            log.info("%s session open: waiting for the first FXCM tick", occurrence.name)
+            log.info("%s session open: waiting for the first tick", occurrence.name)
             return None
         if not self.storage.claim_report(key, "session"):
             return None

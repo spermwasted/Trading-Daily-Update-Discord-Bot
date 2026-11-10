@@ -1,95 +1,96 @@
-# GOLD FXCM – Automated Daily Market Analysis & Session Tracking Discord Bot
+# GOLD – Automated Daily Market Analysis & Session Tracking Discord Bot
 
-Posts professional Discord embeds for **XAU/USD on FXCM** using real FXCM candle
-data from FXCM's official **ForexConnect API**:
+Posts professional Discord embeds for **XAU/USD** using real broker candle data:
 
-* **Daily Market Analysis** – once per new FXCM daily candle: confirmed daily bias
+* **Daily Market Analysis** – once per new daily candle: confirmed daily bias
   (breakout vs liquidity sweep), Premium / Discount / Equilibrium, and all active
   (unfilled or partially filled) Daily / 4H / 1H Fair Value Gaps, nearest first.
 * **Session Opens** – once per Asian, London and New York session open: opening
   price, current price, previous-session high/low, daily bias, premium/discount and
   liquidity-sweep status.
 * Slash commands: `/gold analysis` (adds the intraday *developing* indication),
-  `/gold session` (live session tracker), `/gold status` (FXCM connection health).
+  `/gold session` (live session tracker), `/gold status` (data connection health).
 
 It is **market data and analysis only** – no orders are ever created.
+
+## Data source
+
+| `DATA_PROVIDER` | Source | Account needed |
+|---|---|---|
+| `oanda` (default) | OANDA v20 REST API, XAU_USD **bid** candles | Free OANDA practice (demo) account + API token |
+| `fxcm` | FXCM ForexConnect via the `fxcm_bridge` service | FXCM Trading Station login |
+
+**How close is OANDA to the FXCM chart?** The candle *structure* is the same: OANDA
+candles are requested with `dailyAlignment=17` and `alignmentTimezone=America/New_York`,
+so daily candles run 17:00 → 17:00 New York exactly like FXCM's, and 4H candles are
+aligned to that daily open (17:00, 21:00, 01:00, 05:00, 09:00, 13:00 NY) as on FXCM.
+The *prices* come from a different broker, so highs/lows/closes can differ from your
+FXCM chart by a few cents (occasionally more around news), and OANDA quotes gold with
+3 decimals. Levels, bias and FVGs are therefore OANDA's view of gold, not FXCM's. Every
+embed footer states the data source.
 
 ## Architecture
 
 ```
-            FXCM servers
-                 │  ForexConnect (login: user ID + password + Hosts.jsp + "Demo"/"Real")
-┌────────────────▼─────────────────┐        ┌────────────────────────────────────────────┐
-│ fxcm-bridge  (Python 3.7)        │  HTTP  │ bot  (Python 3.12)                          │
-│  fxcm_bridge/feed.py             │◄──────►│  gold_bot/data/bridge_client.py  data layer │
-│   persistent session, reconnect, │  JSON  │  gold_bot/analysis/*  bias, P/D, FVG, sess. │
-│   live OFFERS prices, get_history│        │  gold_bot/service.py  scheduling, de-dup    │
-│  fxcm_bridge/server.py  GET-only │        │  gold_bot/bot.py      Discord + /commands   │
-└──────────────────────────────────┘        │  SQLite: sent reports, FVGs, session state  │
-                                            └────────────────────────────────────────────┘
+gold_bot/data/          data layer (only place that talks to a broker)
+  oanda.py              OANDA v20 REST provider (default)
+  bridge_client.py      client for fxcm_bridge/ (DATA_PROVIDER=fxcm)
+gold_bot/analysis/      pure functions: bias, premium/discount, FVGs, sessions
+gold_bot/reports.py     builds report data from candles
+gold_bot/service.py     scheduling, duplicate prevention, session tracking
+gold_bot/embeds.py      Discord embeds
+gold_bot/bot.py         discord.py client + /gold commands
+fxcm_bridge/            optional Python 3.7 ForexConnect service (FXCM only)
 ```
 
-**Why two processes?** The newest ForexConnect Python package (`forexconnect`
-1.6.43) ships Linux wheels **only for CPython 3.5–3.7**, while discord.py needs
-Python ≥ 3.8. The bridge isolates the SDK in a Python 3.7 container and exposes a
-small read-only API; the analysis engine never imports ForexConnect.
-
-| Bridge endpoint | Returns |
-|---|---|
-| `GET /health` | session status, last price time, reconnect count, last error (503 when not connected) |
-| `GET /price` | live bid/ask, digits, server time |
-| `GET /candles?timeframe=D1\|H4\|H1\|m15\|m5&count=N` or `&from=ISO&to=ISO` | OHLC (bid) oldest → newest |
-
 ### Reliability
-* **FXCM:** ForexConnect's own quick reconnects (`FXCM_SDK_RECONNECT_ATTEMPTS`), plus a
-  supervisor thread that logs in again with exponential backoff (5 s → 5 min) after
-  `SESSION_LOST` / `DISCONNECTED`, failed logins, or no price for 10 min while the
-  market is open. Data is never served from a dead session (HTTP 503).
-* **Bot:** bridge calls retry with backoff; if data is still unavailable the cycle is
-  skipped and logged – values are never invented. discord.py reconnects to Discord
-  automatically. Each report key (`daily:<trading date>`, `session:<name>:<open time>`)
-  is claimed in SQLite before sending, so it is sent at most once, including across
-  restarts; a failed Discord send releases the claim and is retried.
+* **Data:** every request retries with backoff on network/server errors (a bad token
+  fails fast). If data is still unavailable the cycle is skipped and logged – values are
+  never invented. With OANDA each poll is an independent HTTPS request, so a dropped
+  connection recovers on the next poll (every 20 s) without restarts. The FXCM bridge has
+  its own re-login supervisor.
+* **Discord:** discord.py reconnects automatically.
+* **No duplicates:** each report key (`daily:<trading date>`, `session:<name>:<open time>`)
+  is claimed in SQLite before sending – at most once, including across restarts; a failed
+  send is released and retried.
 
 ## Interpretation of the specification
 
 | Topic | Rule implemented |
 |---|---|
-| FXCM daily candle | 17:00 → 17:00 New York (FXCM "What is Timeframe?"); boundaries come from FXCM's D1 timestamps. A candle is "completed" only after its period ends. |
-| Daily report trigger | The first poll after FXCM's feed shows the new D1 candle (first tick after 17:00 NY; gold reopens ~18:00 NY). |
+| Daily candle | 17:00 → 17:00 New York. "Completed" only after its period ends. |
+| Daily report trigger | First poll after the feed shows the new daily candle (gold reopens ~18:00 NY). |
 | Bullish / bearish bias | Completed daily **close** strictly above previous high / below previous low. |
-| Liquidity sweeps | Wick beyond the level with the close back inside → buy-side sweep = BEARISH, sell-side sweep = BULLISH. Close exactly at the level is not a breakout. |
-| Both sides swept, close inside | NEUTRAL, labelled "Both Sides Swept". |
-| Developing indication | Same rules on the forming candle, shown only in `/gold analysis`, labelled "not a confirmed close". |
-| Dealing range | Previous completed FXCM daily candle (`DEALING_RANGE_MODE=previous_day`; pluggable). |
-| FVG status | **Unfilled** = not tapped yet; **Partially Filled** = price touched/entered the gap (fill %); **Filled** = price reached the far edge → removed. Detection uses completed candles; mitigation counts candle 4 onward including the forming candle. |
-| Sessions (New York time, DST-aware) | Asia 19:00–03:00, London 03:00–08:00, New York 08:00–17:00 NY. In PKT: London 12:00 (summer) / 13:00 (winter), New York 17:00 / 18:00, Asia 04:00 / 05:00. No sessions Fri 17:00 – Sun 17:00 NY. |
-| Session opening price | Open of the first FXCM m5 candle of the session (the report waits for it). |
+| Liquidity sweeps | Wick beyond the level, close back inside → buy-side sweep = BEARISH, sell-side sweep = BULLISH. Close exactly at the level is not a breakout. |
+| Both sides swept, close inside | NEUTRAL, "Both Sides Swept". |
+| Developing indication | Same rules on the forming candle, only in `/gold analysis`, labelled "not a confirmed close". |
+| Dealing range | Previous completed daily candle (`DEALING_RANGE_MODE=previous_day`; pluggable). |
+| FVG status | **Unfilled** = not tapped yet; **Partially Filled** = price touched/entered the gap (fill %); **Filled** = price reached the far edge → removed. Detection on completed candles; mitigation from candle 4 on, including the forming candle. |
+| Sessions (New York time, DST-aware) | Asia 19:00–03:00, London 03:00–08:00, New York 08:00–17:00 NY. In PKT: London 12:00 (summer) / 13:00 (winter), New York 17:00 / 18:00, Asia 04:00 / 05:00. None Fri 17:00 – Sun 17:00 NY. |
+| Session opening price | Open of the first m5 candle of the session (the report waits for it). |
 | Previous session | Asia → previous New York (Friday's on Mondays), London → Asia, New York → London. |
-| Prices | FXCM **bid** (as on FXCM charts), shown with the instrument's own precision. |
-| Candle open price | ForexConnect default `PREVIOUS_CLOSE`; set `FXCM_CANDLE_OPEN_MODE=first_tick` if your chart's opens differ. |
+| Prices | **Bid**, as on broker charts, with the instrument's own precision. |
 
-## Credentials and configuration
+## Credentials
 
-All secrets live in environment variables (a `.env` file on the server, never committed).
-See [`.env.example`](.env.example) for every setting.
+All secrets are environment variables in a `.env` file on the server (never committed);
+see [`.env.example`](.env.example).
 
-1. **FXCM demo account** – open one at FXCM (Trading Station "TSII" account). ForexConnect
-   uses your **Trading Station user ID and password** with
-   `FXCM_URL=https://www.fxcorporate.com/Hosts.jsp` and `FXCM_CONNECTION=Demo`.
-   This is *not* the FXCM REST API token. Use `FXCM_SESSION_ID` / `FXCM_PIN` only if FXCM
-   gave you one. Switch to `FXCM_CONNECTION=Real` only after the demo checks pass.
+1. **OANDA practice account and API token**
+   * Sign up for a free practice (demo) account on oanda.com.
+   * Log in → *My Account* / profile → **Manage API Access** → **Generate** a token.
+   * `.env`: `OANDA_API_TOKEN=<token>`, `OANDA_ENVIRONMENT=practice`.
+     `OANDA_ACCOUNT_ID` is optional (the token's first account is used).
 2. **Discord bot token** – Discord Developer Portal → your application → **Bot** →
-   **Reset Token** → copy. (Not the Client Secret, Application ID or Public Key.)
-   Invite the bot with the `bot` and `applications.commands` scopes and the
-   *Send Messages* + *Embed Links* permissions.
-3. **Channel IDs** – Discord → Settings → Advanced → Developer Mode, then right-click
-   the channel → *Copy Channel ID* → `DISCORD_DAILY_CHANNEL_ID` (and optionally
+   **Reset Token** → copy (not the Client Secret, Application ID or Public Key). Invite the
+   bot with the `bot` and `applications.commands` scopes and *Send Messages* + *Embed Links*.
+3. **Channel IDs** – Discord → Settings → Advanced → Developer Mode, then right-click the
+   channel → *Copy Channel ID* → `DISCORD_DAILY_CHANNEL_ID` (and optionally
    `DISCORD_SESSION_CHANNEL_ID`).
 
 ## Deploying on an always-on server
 
-Any small Linux VPS (1 vCPU / 1 GB RAM is enough) with outbound HTTPS.
+Any small Linux VPS (1 vCPU / 1 GB RAM) with outbound HTTPS.
 
 ```bash
 # 1. Install Docker (Ubuntu/Debian)
@@ -102,29 +103,34 @@ cd Trading-Daily-Update-Discord-Bot
 
 # 3. Configure secrets
 cp .env.example .env
-nano .env            # FXCM_USERNAME, FXCM_PASSWORD, DISCORD_BOT_TOKEN, channel IDs
+nano .env            # OANDA_API_TOKEN, DISCORD_BOT_TOKEN, DISCORD_DAILY_CHANNEL_ID
 chmod 600 .env
 
-# 4. Build, then verify the FXCM demo connection BEFORE starting the bot
+# 4. Build and preview the reports from live data without posting to Discord
 docker compose build
-docker compose run --rm fxcm-bridge python -m fxcm_bridge.verify --seconds 30
-#   -> PASS live price, PASS D1/H4/H1/m15/m5 history, D1 candles start 17:00 New York
-
-# 5. Preview the reports from live FXCM data without posting to Discord
-docker compose up -d fxcm-bridge
 docker compose run --rm bot python -m gold_bot --dry-run
 
-# 6. Start everything (restarts automatically after crashes and reboots)
+# 5. Start (restarts automatically after crashes and reboots)
 docker compose up -d
 docker compose logs -f
 ```
 
-Operations:
-* `docker compose ps` – health (`fxcm-bridge` is *healthy* only while logged in to FXCM).
-* `docker compose logs -f fxcm-bridge` – login/reconnect events.
-* `/gold status` in Discord – connection status, last price time, reconnect count.
-* Update: `git pull && docker compose up -d --build`.
-* The SQLite database (sent reports, FVGs, session state) lives in the `bot-data` volume.
+Operations: `docker compose ps`, `docker compose logs -f bot`, `/gold status` in Discord.
+Update with `git pull && docker compose up -d --build`. The SQLite database lives in the
+`bot-data` volume.
+
+### Using FXCM instead
+Set `DATA_PROVIDER=fxcm`, fill in `FXCM_USERNAME` / `FXCM_PASSWORD` (Trading Station login,
+`FXCM_CONNECTION=Demo` first), then:
+
+```bash
+docker compose --profile fxcm build
+docker compose --profile fxcm run --rm fxcm-bridge python -m fxcm_bridge.verify
+docker compose --profile fxcm up -d
+```
+
+The bridge exists because FXCM's ForexConnect Python package (1.6.43) only supports
+CPython 3.5–3.7 on Linux, while discord.py needs Python ≥ 3.8.
 
 ## Development
 
@@ -133,8 +139,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 ```
 
-The tests cover daily bias, both liquidity sweeps, premium/discount, bullish/bearish FVG
+Tests cover daily bias, both liquidity sweeps, premium/discount, bullish/bearish FVG
 detection, partial and full mitigation, all three session triggers, DST transitions,
-duplicate-report prevention (including restarts), data-provider failures and FXCM
-reconnection (with a stand-in SDK). Live verification against FXCM is
-`python -m fxcm_bridge.verify` as shown above.
+duplicate-report prevention (including restarts), data-provider failures, the OANDA
+client (request parameters, bid parsing, retries) and FXCM reconnection.

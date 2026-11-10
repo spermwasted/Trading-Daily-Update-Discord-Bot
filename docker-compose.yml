@@ -1,5 +1,8 @@
 services:
+  # Only needed with DATA_PROVIDER=fxcm (requires an FXCM Trading Station login).
+  # Start it with:  docker compose --profile fxcm up -d
   fxcm-bridge:
+    profiles: ["fxcm"]
     build:
       context: .
       dockerfile: fxcm_bridge/Dockerfile
@@ -19,8 +22,6 @@ services:
     environment:
       FXCM_BRIDGE_URL: http://fxcm-bridge:8765
       DATABASE_PATH: /app/data/gold_bot.sqlite3
-    depends_on:
-      - fxcm-bridge
     restart: unless-stopped
     volumes:
       - bot-data:/app/data

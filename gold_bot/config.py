@@ -25,9 +25,16 @@ class Settings(BaseSettings):
     discord_session_channel_id: int = 0  # 0 = same as the daily channel
     discord_guild_id: int = 0  # optional: instant slash-command sync to one server
 
-    # Market data (FXCM ForexConnect bridge)
+    # Market data: "oanda" (OANDA v20 REST, default) or "fxcm" (ForexConnect bridge)
+    data_provider: str = "oanda"
+    oanda_api_token: SecretStr = Field(default=SecretStr(""))
+    oanda_account_id: str = ""  # optional: first account of the token is used
+    oanda_environment: str = "practice"  # practice (demo) or live
+    oanda_instrument: str = "XAU_USD"
+    oanda_smooth: bool = False  # False: candle open = first tick (OANDA default)
     fxcm_bridge_url: str = "http://fxcm-bridge:8765"
     fxcm_symbol: str = "XAU/USD"
+    report_brand: str = "GOLD FXCM"  # embed title prefix, e.g. "GOLD FXCM | LONDON SESSION OPEN"
     bridge_timeout_seconds: float = 30.0
     bridge_retries: int = 3
 
@@ -64,6 +71,14 @@ class Settings(BaseSettings):
             raise ValueError(f"DEALING_RANGE_MODE must be one of {sorted(RANGE_BUILDERS)}")
         return value
 
+    @field_validator("data_provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in ("oanda", "fxcm"):
+            raise ValueError("DATA_PROVIDER must be 'oanda' or 'fxcm'")
+        return value
+
     @field_validator("session_asia_open", "session_london_open", "session_newyork_open", "session_newyork_close")
     @classmethod
     def _check_hhmm(cls, value: str) -> str:
@@ -77,6 +92,14 @@ class Settings(BaseSettings):
     @cached_property
     def session_zone(self) -> ZoneInfo:
         return ZoneInfo(self.session_tz)
+
+    @property
+    def display_symbol(self) -> str:
+        return self.oanda_instrument.replace("_", "/") if self.data_provider == "oanda" else self.fxcm_symbol
+
+    @property
+    def source_name(self) -> str:
+        return "OANDA" if self.data_provider == "oanda" else "FXCM"
 
     @property
     def session_channel(self) -> int:

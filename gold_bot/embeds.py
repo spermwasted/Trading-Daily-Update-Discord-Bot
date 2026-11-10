@@ -42,7 +42,7 @@ def fmt(value: float | None, digits: int) -> str:
 
 def _direction_text(bias: BiasResult | None) -> str:
     if bias is None:
-        return "⚪ NEUTRAL (insufficient FXCM daily data)"
+        return "⚪ NEUTRAL (insufficient daily data)"
     return f"{DIRECTION_ICON[bias.direction]} **{bias.direction.value}**"
 
 
@@ -76,8 +76,8 @@ def _fvg_block(gaps: list[FVG], price: float, digits: int, limit: int) -> str:
     return "\n".join(lines)
 
 
-def _footer(embed: discord.Embed, text: str, now: datetime, tz: ZoneInfo) -> None:
-    embed.set_footer(text=f"{text} • {fmt_local(now, tz)}")
+def _footer(embed: discord.Embed, text: str, source: str, now: datetime, tz: ZoneInfo) -> None:
+    embed.set_footer(text=f"{text} • Data: {source} bid • {fmt_local(now, tz)}")
     embed.timestamp = now
 
 
@@ -86,9 +86,9 @@ def daily_embed(report: DailyReport, tz: ZoneInfo, max_per_side: int = 6) -> dis
     bias = report.bias
     trade_day = trading_date(report.trading_day_start)
     embed = discord.Embed(
-        title="GOLD FXCM | DAILY MARKET ANALYSIS",
+        title=f"{report.brand} | DAILY MARKET ANALYSIS",
         description=(
-            f"**{report.instrument}** · FXCM trading day **{trade_day:%a %d %b %Y}** "
+            f"**{report.instrument}** · trading day **{trade_day:%a %d %b %Y}** "
             f"(opened {fmt_local(report.trading_day_start, tz)})"
         ),
         color=bias_color(bias),
@@ -150,10 +150,10 @@ def daily_embed(report: DailyReport, tz: ZoneInfo, max_per_side: int = 6) -> dis
     if report.fvg_errors:
         embed.add_field(
             name="⚠️ Data notice",
-            value="\n".join(f"{tf}: FXCM data unavailable" for tf in report.fvg_errors)[:FIELD_LIMIT],
+            value="\n".join(f"{tf}: {report.source} data unavailable" for tf in report.fvg_errors)[:FIELD_LIMIT],
             inline=False,
         )
-    _footer(embed, "GOLD FXCM | Automated Market Intelligence", report.generated_at, tz)
+    _footer(embed, f"{report.brand} | Automated Market Intelligence", report.source, report.generated_at, tz)
     return embed
 
 
@@ -166,9 +166,9 @@ def developing_embed(report: DailyReport, tz: ZoneInfo, max_per_side: int = 6) -
             1,
             name="⏳ INTRADAY DEVELOPING INDICATION (not a confirmed close)",
             value=(
-                f"• Current FXCM daily candle so far: {DIRECTION_ICON[dev.direction]} {dev.direction.value}\n"
+                f"• Current daily candle so far: {DIRECTION_ICON[dev.direction]} {dev.direction.value}\n"
                 f"• {dev.signal.value}\n"
-                f"• Becomes confirmed only after the FXCM daily close (17:00 New York)\n{SEPARATOR}"
+                f"• Becomes confirmed only after the daily close (17:00 New York)\n{SEPARATOR}"
             )[:FIELD_LIMIT],
             inline=False,
         )
@@ -179,7 +179,7 @@ def session_embed(report: SessionReport, tz: ZoneInfo, title_suffix: str = "OPEN
     d = report.digits
     s = report.session
     embed = discord.Embed(
-        title=f"GOLD FXCM | {s.name.upper()} SESSION {title_suffix}",
+        title=f"{report.brand} | {s.name.upper()} SESSION {title_suffix}",
         description=f"**{report.instrument}** · {fmt_local(s.start, tz)} → {fmt_local(s.end, tz, with_date=False)}",
         color=position_color(report.premium_discount),
     )
@@ -228,5 +228,5 @@ def session_embed(report: SessionReport, tz: ZoneInfo, title_suffix: str = "OPEN
         )[:FIELD_LIMIT],
         inline=False,
     )
-    _footer(embed, "GOLD FXCM | Session Intelligence", report.generated_at, tz)
+    _footer(embed, f"{report.brand} | Session Intelligence", report.source, report.generated_at, tz)
     return embed

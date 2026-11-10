@@ -1,4 +1,4 @@
-"""Build daily-analysis and session reports from FXCM data (no Discord code here)."""
+"""Build daily-analysis and session reports from market data (no Discord code here)."""
 from __future__ import annotations
 
 import logging
@@ -28,9 +28,11 @@ log = logging.getLogger(__name__)
 @dataclass
 class DailyReport:
     generated_at: datetime
+    source: str  # data provider name shown in the embeds, e.g. "OANDA"
+    brand: str
     instrument: str
     digits: int
-    trading_day_start: datetime  # open time of the newly opened FXCM daily candle
+    trading_day_start: datetime  # open time of the newly opened daily candle
     daily_open: float | None  # None if the new candle is not in the feed yet
     previous_day: Candle
     bias: BiasResult | None
@@ -46,6 +48,8 @@ class DailyReport:
 @dataclass
 class SessionReport:
     generated_at: datetime
+    source: str
+    brand: str
     instrument: str
     digits: int
     session: SessionOccurrence
@@ -75,12 +79,12 @@ class ReportBuilder:
     async def current_price(self, fallback: Candle | None) -> tuple[Price | None, float, str]:
         try:
             price = await self.provider.get_price()
-            return price, price.value, "FXCM live bid"
+            return price, price.value, f"{self.settings.source_name} live bid"
         except DataUnavailable:
             if fallback is None:
                 raise
-            log.warning("Live price unavailable; using last FXCM candle close")
-            return None, fallback.close, "last FXCM candle close (live quote unavailable)"
+            log.warning("Live price unavailable; using last candle close")
+            return None, fallback.close, "last candle close (live quote unavailable)"
 
     async def active_fvgs(self, now: datetime, price: float) -> tuple[list[fvg_mod.FVG], dict[str, str]]:
         gaps: list[fvg_mod.FVG] = []
@@ -103,14 +107,16 @@ class ReportBuilder:
     async def build_daily(self, now: datetime) -> DailyReport:
         completed, forming = await self.daily_context(now)
         if not completed:
-            raise DataUnavailable("no completed FXCM daily candles available")
+            raise DataUnavailable("no completed daily candles available")
         price_obj, price, source = await self.current_price(forming or completed[-1])
         digits = price_obj.digits if price_obj else 2
         rng = build_range(self.settings.dealing_range_mode, completed)
         fvgs, errors = await self.active_fvgs(now, price)
         return DailyReport(
             generated_at=now,
-            instrument=self.settings.fxcm_symbol,
+            source=self.settings.source_name,
+            brand=self.settings.report_brand,
+            instrument=self.settings.display_symbol,
             digits=digits,
             trading_day_start=forming.time if forming else completed[-1].time,
             daily_open=forming.open if forming else None,
@@ -139,7 +145,9 @@ class ReportBuilder:
         rng = build_range(self.settings.dealing_range_mode, completed)
         return SessionReport(
             generated_at=now,
-            instrument=self.settings.fxcm_symbol,
+            source=self.settings.source_name,
+            brand=self.settings.report_brand,
+            instrument=self.settings.display_symbol,
             digits=price_obj.digits if price_obj else 2,
             session=occurrence,
             previous_session=previous,

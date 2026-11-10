@@ -1,7 +1,7 @@
 """Entry point.
 
     python -m gold_bot                 run the Discord bot (needs DISCORD_BOT_TOKEN)
-    python -m gold_bot --dry-run       build both reports from live FXCM data and
+    python -m gold_bot --dry-run       build both reports from live market data and
                                        print the embeds as JSON (no Discord)
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sys
 
 from gold_bot.analysis.sessions import SessionSchedule
 from gold_bot.config import Settings
-from gold_bot.data.bridge_client import BridgeClient
+from gold_bot.data.factory import ConfigurationError, make_provider
 from gold_bot.data.provider import DataUnavailable
 from gold_bot.storage import Storage
 
@@ -29,13 +29,13 @@ async def _dry_run(settings: Settings) -> int:
     from gold_bot.reports import ReportBuilder
     from gold_bot.service import utc_now
 
-    provider = BridgeClient(settings.fxcm_bridge_url, settings.bridge_timeout_seconds, settings.bridge_retries)
+    provider = make_provider(settings)
     storage = Storage(":memory:")
     schedule = SessionSchedule(settings.session_times(), settings.session_zone)
     builder = ReportBuilder(settings, provider, storage, schedule)
     now = utc_now()
     try:
-        print("Bridge health:", json.dumps(await provider.health(), indent=2))
+        print("Data source health:", json.dumps(await provider.health(), indent=2))
         daily = await builder.build_daily(now)
         print(json.dumps(developing_embed(daily, settings.display_zone).to_dict(), indent=2, ensure_ascii=False))
         occurrence = schedule.current(now) or schedule.latest_open(now)
@@ -43,7 +43,7 @@ async def _dry_run(settings: Settings) -> int:
             session = await builder.build_session(occurrence, now)
             print(json.dumps(session_embed(session, settings.display_zone, "TRACKER").to_dict(), indent=2, ensure_ascii=False))
     except DataUnavailable as exc:
-        print(f"FXCM data unavailable: {exc}")
+        print(f"{settings.source_name} data unavailable: {exc}")
         return 1
     finally:
         await provider.aclose()
@@ -51,12 +51,17 @@ async def _dry_run(settings: Settings) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="GOLD FXCM Discord bot")
-    parser.add_argument("--dry-run", action="store_true", help="print reports from live FXCM data, no Discord")
+    parser = argparse.ArgumentParser(description="GOLD market intelligence Discord bot")
+    parser.add_argument("--dry-run", action="store_true", help="print reports from live market data, no Discord")
     args = parser.parse_args()
 
     settings = Settings()
     _setup_logging(settings.log_level)
+    try:
+        make_provider(settings)  # validate provider configuration early
+    except ConfigurationError as exc:
+        logging.error("%s", exc)
+        return 2
     if args.dry_run:
         return asyncio.run(_dry_run(settings))
 
@@ -72,7 +77,7 @@ def main() -> int:
     from gold_bot.service import ReportService
 
     bot = GoldBot(settings)
-    provider = BridgeClient(settings.fxcm_bridge_url, settings.bridge_timeout_seconds, settings.bridge_retries)
+    provider = make_provider(settings)
     storage = Storage(settings.database_path)
     schedule = SessionSchedule(settings.session_times(), settings.session_zone)
     bot.attach_service(ReportService(settings, provider, storage, DiscordPublisher(bot), schedule))

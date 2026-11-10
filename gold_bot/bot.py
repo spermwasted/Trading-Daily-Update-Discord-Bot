@@ -65,7 +65,7 @@ class GoldBot(discord.Client):
 
 
 def _gold_commands(bot: GoldBot) -> app_commands.Group:
-    group = app_commands.Group(name="gold", description="GOLD FXCM market intelligence")
+    group = app_commands.Group(name="gold", description="GOLD market intelligence")
 
     @group.command(name="analysis", description="Daily bias, premium/discount and active FVGs right now")
     async def analysis(interaction: discord.Interaction) -> None:
@@ -73,7 +73,7 @@ def _gold_commands(bot: GoldBot) -> app_commands.Group:
         try:
             report = await bot.service.builder.build_daily(bot.service.clock())
         except DataUnavailable as exc:
-            await interaction.followup.send(f"⚠️ FXCM data unavailable: {exc}")
+            await interaction.followup.send(f"⚠️ Market data unavailable: {exc}")
             return
         await interaction.followup.send(
             embed=developing_embed(report, bot.settings.display_zone, bot.settings.fvg_max_per_side)
@@ -96,16 +96,16 @@ def _gold_commands(bot: GoldBot) -> app_commands.Group:
         try:
             report = await bot.service.builder.build_session(occurrence, now)
         except DataUnavailable as exc:
-            await interaction.followup.send(f"⚠️ FXCM data unavailable: {exc}")
+            await interaction.followup.send(f"⚠️ Market data unavailable: {exc}")
             return
         await interaction.followup.send(embed=session_embed(report, bot.settings.display_zone, "TRACKER"))
 
-    @group.command(name="status", description="FXCM data connection status")
+    @group.command(name="status", description="Market data connection status")
     async def status(interaction: discord.Interaction) -> None:
         health = await bot.service.provider.health()
         ok = health.get("connected")
         lines = [
-            f"FXCM connection: {'🟢 connected' if ok else '🔴 not connected'} ({health.get('status')})",
+            f"{bot.settings.source_name} connection: {'🟢 connected' if ok else '🔴 not connected'} ({health.get('status')})",
             f"Account type: {health.get('connection', 'n/a')} · Instrument: {health.get('instrument', 'n/a')}",
             f"Last price update: {health.get('last_price_received_at', 'n/a')}",
             f"Reconnects: {health.get('reconnects', 'n/a')}",
