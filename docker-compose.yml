@@ -1,0 +1,32 @@
+services:
+  fxcm-bridge:
+    build:
+      context: .
+      dockerfile: fxcm_bridge/Dockerfile
+    env_file: .env
+    restart: unless-stopped
+    expose:
+      - "8765"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      FXCM_BRIDGE_URL: http://fxcm-bridge:8765
+      DATABASE_PATH: /app/data/gold_bot.sqlite3
+    depends_on:
+      - fxcm-bridge
+    restart: unless-stopped
+    volumes:
+      - bot-data:/app/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  bot-data:

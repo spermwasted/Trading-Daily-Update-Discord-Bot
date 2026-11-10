@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8
+numpy>=1.26  # only for testing fxcm_bridge's history conversion
