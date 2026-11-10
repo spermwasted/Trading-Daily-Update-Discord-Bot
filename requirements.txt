@@ -1,0 +1,5 @@
+discord.py>=2.6
+aiohttp>=3.9
+Pillow>=10.1
+tzdata; platform_system == "Windows"
+# optional: psutil (botinfo resources), yt-dlp + ffmpeg (social/video studio), PyNaCl (voice)

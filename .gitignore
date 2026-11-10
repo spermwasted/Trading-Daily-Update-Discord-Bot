@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+logs/
+token.txt
+*.json
+*.json.bak
+*.json.tmp
+*.corrupt-*
+words.txt
+cookies.txt
