@@ -1,7 +1,8 @@
 # Trading-Daily-Update-Discord-Bot
 
 All-in-one Discord bot (`bot.py`) — moderation, antinuke, games, economy, media tools — now
-**v6.0.0 "Market Desk" (build 48)** with a full trading / daily-market-update system.
+**v6.1.0 "Turbo Shield" (build 49)** — antinuke engine v3, new arcade games, and the
+trading / daily-market-update system from 6.0.0.
 
 ## Run
 ```bash
@@ -30,6 +31,28 @@ Enable **Server Members** and **Message Content** intents in the Developer Porta
 Symbols: `AAPL`, `BTC`, `ETH`, `EURUSD`, `EUR/USD`, `GOLD`, `OIL`, `SPX`, `^GSPC`, `RELIANCE.NS` …
 Ranges: `1d 5d 1mo 3mo 6mo ytd 1y 2y 5y max`. Data: Yahoo Finance chart API, CoinGecko,
 alternative.me — no API keys. Not financial advice.
+
+## ⚡ Antinuke engine v3 "Turbo" (new in 6.1.0)
+* **Faster:** compiled per-server config (O(1) hot path, µs decisions) · recovery starts in parallel with
+  the punishment · disk writes moved to a background writer · concurrent audit-log sweeps.
+* **Watchdog:** if Discord's audit event for a channel/role delete, ban, webhook or server edit hasn't
+  arrived after 1.2 s, the bot pulls the audit log itself.
+* **Swarm detection:** several accounts attacking together are all banned at once (bystanders with a
+  tiny share are left alone). **Slow-nuke:** 30-minute heat budget per account.
+* `,antinuke speed` (p50/p95 latency + live benchmark) · `,antinuke scan` (risk grade + fix list) ·
+  `,antinuke swarm <n|off>` · `,antinuke slownuke <n|off>` · `,antinuke watchdog on|off` · `,antinuke engine`
+
+## 🚀 Arcade Pro (new in 6.1.0)
+| Command | Game |
+|---|---|
+| `,crash <bet>` | Live multiplier rocket — cash out before it explodes (3 % house edge) |
+| `,towers <bet> [easy\|normal\|hard]` | Climb 8 floors picking safe doors, cash out any floor |
+| `,c4bot [easy\|normal\|hard]` | Four in a row vs a bitboard alpha-beta AI with iterative deepening |
+| `,lights [3-5]` | Toggle puzzle; 🧠 hints come from a GF(2) linear-algebra solver |
+| `,dicepoker <bet>` | 5 dice vs the bot, hold & reroll once, 2× payout |
+| `,gameprofile [@user]` · `,arcadelb` | Cross-game profile and all-round leaderboard |
+
+Bets accept `500`, `2k`, `half`, `all`, `25%`.
 
 ## 🏷️ Versioning
 * `BOT_VERSION` / `BOT_BUILD` / `BOT_CHANGELOG` live at the top of `bot.py` — bump them on each release.

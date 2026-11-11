@@ -52,12 +52,22 @@ CONFIG_FILE      = "config.json"
 # ══════════════════════════════════════════════════════════════════════════════
 #  🏷️  VERSION  — bump these on every release (see ,version / ,changelog)
 # ══════════════════════════════════════════════════════════════════════════════
-BOT_VERSION  = "6.0.0"
-BOT_BUILD    = 48
-BOT_CODENAME = "Market Desk"
-BOT_RELEASED = "2026-11-10"
+BOT_VERSION  = "6.1.0"
+BOT_BUILD    = 49
+BOT_CODENAME = "Turbo Shield"
+BOT_RELEASED = "2026-11-11"
 # newest first — ,changelog pages through this list and the owner is DM'd entry [0] after an upgrade
 BOT_CHANGELOG = [
+    {"version": "6.1.0", "build": 49, "date": "2026-11-11", "name": "Turbo Shield", "notes": [
+        "⚡ Antinuke engine v3: compiled O(1) config on the hot path · µs-level decisions",
+        "♻️ Recovery now starts in parallel with the punishment (one API round-trip sooner)",
+        "🐕 Watchdog: if Discord's audit event is late, the bot pulls the audit log itself after 1.2 s",
+        "💾 Antinuke disk writes moved to a background writer — attacks never stall the event loop",
+        "🐝 Swarm detection (multi-account attacks) · 🐢 slow-nuke 30-min heat budget",
+        "📈 ,antinuke speed (p50/p95 latency + live benchmark) · 🔍 ,antinuke scan (risk grade + fix list)",
+        "🚀 New games: ,crash · ,towers · ,c4bot (alpha-beta AI) · ,lights (GF(2) solver hints) · ,dicepoker",
+        "🏅 ,gameprofile cross-game profile · ,arcadelb all-round leaderboard",
+    ]},
     {"version": "6.0.0", "build": 48, "date": "2026-11-10", "name": "Market Desk", "notes": [
         "📈 New Market Desk system — stocks, ETFs, indices, FX, futures & crypto from one command set",
         "🕯️ ,chart — candlesticks + SMA20/50 + Bollinger cloud + volume + RSI, with live range buttons",
@@ -25821,11 +25831,14 @@ async def cmd_games(ctx: commands.Context):
     p = ctx.prefix
     e = discord.Embed(title="🎮  Game Arcade", color=C_PURPLE,
                       description="Pick a game — winners earn 🪙 · `" + p + "gamelb <game>` for leaderboards")
-    e.add_field(name="🎯  Guess games  ✨ new", inline=False, value=(
+    e.add_field(name="🚀  Arcade Pro  ✨ new", inline=False, value=(
+        f"`{p}crash <bet>` live rocket · `{p}towers <bet>` climb & cash out · `{p}dicepoker <bet>` 5 dice vs bot\n"
+        f"`{p}c4bot [hard]` four-in-a-row vs AI · `{p}lights` toggle puzzle · `{p}gameprofile` · `{p}arcadelb`"))
+    e.add_field(name="🎯  Guess games", inline=False, value=(
         f"`{p}hotcold [max]` hot/cold number hunt · `{p}emojiguess` decode emojis · `{p}flagguess` name the flag\n"
         f"`{p}capitals` capital quiz · `{p}codebreaker` 🔴🟢🔵 mastermind · `{p}bulls` bulls & cows\n"
         f"`{p}whosaid` who wrote that message? · `{p}stopclock` stop at exactly 10s"))
-    e.add_field(name="⚡  Reflex & buttons  ✨ new", inline=False, value=(
+    e.add_field(name="⚡  Reflex & buttons", inline=False, value=(
         f"`{p}quickdraw` fastest finger · `{p}memory` match the pairs · `{p}mines [bet]` 💎 vs 💣"))
     e.add_field(name="👥  Multiplayer word games", inline=False, value=(
         f"`{p}blacktea` · `{p}wordchain` · `{p}wordle` · `{p}hangman` · `{p}typerace` · `{p}mathrace` · `{p}btstop`"))
@@ -32714,6 +32727,1508 @@ async def cmd_sb_reset(ctx, target: str = None, confirm: str = None):
     _sb_cache.clear()
     _sb_mark()
     await send_v2(ctx, discord.Embed(description=f"🧹  Wiped stats for **{member.display_name}**.", color=C_GREEN))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ⚡  ANTINUKE ENGINE v3 "TURBO"  (added in bot-49 / v6.1.0)
+#  ─────────────────────────────────────────────────────────────────────────────
+#  FASTER RESPONSE
+#   • compiled per-guild config: whitelist / bot-allow / trust become frozensets and every
+#     threshold is pre-resolved, so the hot path does O(1) lookups instead of list scans and
+#     dict.get chains (rebuilt on every save, and at most 15 s stale otherwise)
+#   • recovery now starts IN PARALLEL with the punishment instead of after it — rebuilt
+#     channels/roles and reverted perms land one full API round-trip sooner
+#   • config + incident writes are serialised to a background writer thread, so an attack
+#     never stalls the event loop on disk I/O (atomic tmp+replace, write order preserved)
+#   • event-flood sweeps dispatch every audit entry concurrently instead of one by one
+#   • WATCHDOG: every destructive gateway event (channel/role delete or create, ban,
+#     webhook, server edit, dangerous role edit) arms a 1.2 s timer; if the matching audit
+#     entry hasn't arrived by then, the bot pulls the audit log for that action itself — a
+#     dropped/late audit event now costs ~1 s instead of waiting for a 3-event flood
+#  NEW DETECTION
+#   • SWARM: several accounts each staying under their own limits — the shield keeps a
+#     server-wide heat counter and punishes every contributing attacker at once
+#   • SLOW-NUKE: a long-window (30 min) heat budget catches attackers who pace themselves
+#     to stay under the 8-second window
+#  NEW CONTROLS   ,shield speed · swarm · slownuke · watchdog · scan · engine
+#                 (all also work as ,antinuke <x>)
+# ══════════════════════════════════════════════════════════════════════════════
+import concurrent.futures as _an3_cf
+import statistics as _an3_stats
+
+AN3_WATCH_DELAY = 1.2          # seconds to wait for the audit entry before sweeping ourselves
+AN3_WATCH_COOLDOWN = 2.5       # min seconds between watchdog sweeps for the same (guild, action)
+AN3_SLOW_WINDOW = 1800         # slow-nuke look-back (seconds)
+AN3_DEFAULT_SWARM = 12         # server-wide heat (≥2 actors) inside the window that trips a swarm
+AN3_DEFAULT_SLOW = 45          # one actor's heat inside AN3_SLOW_WINDOW that trips slow-nuke
+
+ANTINUKE_ACTION_LABELS.update({
+    "swarm": "coordinated multi-account attack (swarm)",
+    "slow_nuke": "slow-paced nuke (long-window heat budget)",
+})
+
+_AN3_CC: dict = {}             # gid -> compiled config
+_AN3_ARRIVE: dict = {}         # (gid, AuditLogAction) -> last time an audit entry of that kind arrived
+_AN3_WD_PENDING: set = set()   # (gid, action) with a watchdog timer running
+_AN3_WD_LAST: dict = {}        # (gid, action) -> last watchdog sweep
+_AN3_WD_STATS: dict = {}       # gid -> {"armed": n, "sweeps": n, "caught": n}
+_AN3_VIA: dict = {}            # audit entry id -> "watchdog" | "flood"
+_AN3_SLOW: dict = {}           # (gid, uid) -> deque[(ts, weight)]
+_AN3_SWARM: dict = {}          # gid -> deque[(ts, uid, weight)]
+_AN3_METRICS = deque(maxlen=300)
+_AN3_WRITER = _an3_cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="antinuke-writer")
+
+
+# ── background writer (atomic, ordered, never blocks the event loop) ─────────
+def _an3_write_payload(path: str, payload: str):
+    tmp = f"{path}.tmp"
+    with _json_lock:
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+            now = time.time()
+            if os.path.exists(path) and now - _last_backup.get(path, 0) > _BACKUP_EVERY:
+                try:
+                    _shutil.copy2(path, path + ".bak")
+                    _last_backup[path] = now
+                except OSError:
+                    pass
+            os.replace(tmp, path)
+        except OSError as exc:
+            _log.error("antinuke writer: %s FAILED: %s", path, exc)
+
+
+def _an3_save(path: str, data) -> None:
+    """Serialise NOW (consistent snapshot, on the loop) and write in the background thread."""
+    try:
+        payload = json.dumps(data, indent=2, default=_json_default)
+    except (TypeError, ValueError) as exc:
+        _log.error("antinuke save of %s refused (not serialisable): %s", path, exc)
+        return
+    try:
+        asyncio.get_running_loop()
+        _AN3_WRITER.submit(_an3_write_payload, path, payload)
+    except RuntimeError:                       # no loop (startup / shutdown) → write inline
+        _an3_write_payload(path, payload)
+
+
+def save_antinuke_config():                    # replaces the sync version for every caller (global lookup)
+    _AN3_CC.clear()
+    _an3_save(ANTINUKE_CONFIG_FILE, antinuke_config)
+
+
+def _an_record_incident(guild, uid, key, label, took, detect_ms, response_ms, report):
+    rec = an_incidents.setdefault(str(guild.id), [])
+    rec.append({"ts": int(time.time()), "actor": uid, "key": key, "label": label, "action": took,
+                "detect_ms": round(detect_ms), "response_ms": round(response_ms), "recovered": report or {}})
+    del rec[:-25]
+    _an3_save(AN_INCIDENTS_FILE, an_incidents)
+
+
+# ── compiled config ──────────────────────────────────────────────────────────
+def _an3_ints(xs) -> frozenset:
+    out = set()
+    for x in xs or ():
+        try:
+            out.add(int(x))
+        except (TypeError, ValueError):
+            pass
+    return frozenset(out)
+
+
+def _an3_cc(gid: int, cfg: dict) -> dict:
+    cc = _AN3_CC.get(gid)
+    now = time.monotonic()
+    if cc is not None and cc["src"] is cfg and now - cc["at"] < 15:
+        return cc
+    strict = bool(cfg.get("strict_mode", True))
+    heat_limit = int(cfg.get("heat_limit", 8) or 0)
+    if strict and heat_limit:
+        heat_limit = min(heat_limit, 6)
+    trust = {}
+    for k, v in (cfg.get("trust") or {}).items():
+        try:
+            trust[int(k)] = frozenset(v or ())
+        except (TypeError, ValueError):
+            pass
+    cc = {
+        "src": cfg, "at": now, "strict": strict, "heat_limit": heat_limit,
+        "window": int(cfg.get("window_seconds", 8) or 8),
+        "wl": _an3_ints(cfg.get("whitelist")), "bwl": _an3_ints(cfg.get("bot_whitelist")), "trust": trust,
+        "wl_cap": int(cfg.get("whitelist_cap", 14) or 0),
+        "swarm": int(cfg.get("swarm_limit", AN3_DEFAULT_SWARM) or 0),
+        "slow": int(cfg.get("slow_limit", AN3_DEFAULT_SLOW) or 0),
+        "recovery": cfg.get("recovery", True),
+    }
+    _AN3_CC[gid] = cc
+    return cc
+
+
+# ── extra detectors (pure, in-memory) ────────────────────────────────────────
+def _an3_slow_heat(qkey: tuple, weight: int, now: float, window: int = AN3_SLOW_WINDOW) -> int:
+    dq = _AN3_SLOW.setdefault(qkey, deque())
+    dq.append((now, weight))
+    cutoff = now - window
+    while dq and dq[0][0] < cutoff:
+        dq.popleft()
+    return sum(w for _, w in dq)
+
+
+def _an3_swarm_check(gid: int, uid: int, weight: int, now: float, window: int, limit: int) -> list:
+    """Server-wide heat. Once the combined heat reaches `limit`, returns every actor that contributed a
+    meaningful share (≥ max(2, limit/4)) — but only if at least two such actors exist. A bystander who did
+    one small edit in the same seconds is never swept in."""
+    dq = _AN3_SWARM.setdefault(gid, deque())
+    dq.append((now, uid, weight))
+    cutoff = now - window
+    while dq and dq[0][0] < cutoff:
+        dq.popleft()
+    if not limit:
+        return []
+    total, actors = 0, {}
+    for _, a, w in dq:
+        total += w
+        actors[a] = actors.get(a, 0) + w
+    if total < limit:
+        return []
+    floor = max(2, limit // 4)
+    hot = [a for a, w in actors.items() if w >= floor]
+    return sorted(hot, key=actors.get, reverse=True) if len(hot) >= 2 else []
+
+
+def _an3_metric(gid, key, via, decide_us, punish_ms, response_ms, detect_ms):
+    _AN3_METRICS.append({"ts": time.time(), "gid": gid, "key": key, "via": via, "decide_us": decide_us,
+                         "punish_ms": punish_ms, "response_ms": response_ms, "detect_ms": detect_ms})
+
+
+def _an3_pct(xs, p):
+    if not xs:
+        return None
+    xs = sorted(xs)
+    k = max(0, min(len(xs) - 1, int(round(p / 100 * (len(xs) - 1)))))
+    return xs[k]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  THE HOT PATH (v3) — same decisions as v2, plus swarm / slow-nuke, plus timing
+# ══════════════════════════════════════════════════════════════════════════════
+@bot.event
+async def on_audit_log_entry_create(entry: discord.AuditLogEntry):
+    t0 = time.perf_counter()
+    guild = entry.guild
+    gid = guild.id
+    cfg = antinuke_config.get(str(gid))
+    if not cfg or not cfg.get("enabled"):
+        return
+    now = time.time()
+    _AN3_ARRIVE[(gid, entry.action)] = now
+    eid = entry.id
+    if eid in _AN_SEEN:                                       # exactly-once (gateway + watchdog + flood sweep)
+        return
+    _AN_SEEN[eid] = now
+    uid = entry.user_id
+    if uid is None or uid == bot.user.id or uid == guild.owner_id or uid == BOT_OWNER_ID:
+        return
+    cc = _an3_cc(gid, cfg)
+    try:
+        found = _an_classify(entry, guild, cfg)
+    except Exception as exc:
+        report_exception(exc, kind="event", where="antinuke:classify")
+        return
+    if found is None:
+        return
+    key, critical = found
+    if key == "bot_add" and getattr(entry.target, "id", None) in cc["bwl"]:
+        return
+    tr = cc["trust"].get(uid)
+    if tr and ("all" in tr or key in tr):
+        return
+
+    qkey = (gid, uid)
+    qt = _AN_QUAR.get(qkey)
+    if qt is not None and now - qt < AN_QUAR_SECONDS:           # in-flight leftover of an attack → undo it
+        if key == "bot_add":
+            _AN_DONE[eid] = now
+            _an_spawn(_an_kick_bot(guild, entry.target, "antinuke: unauthorized bot"))
+        elif cc["recovery"]:
+            _an_spawn(_an_recover(guild, [(key, entry)], cfg))
+        return
+
+    window = cc["window"]
+    trip = None
+    swarm_actors = []
+    if uid in cc["wl"]:      # whitelisted ≠ unlimited: a hijacked trusted account still hits a heat cap
+        _an_hit(qkey, key, entry, now, window)
+        cap = cc["wl_cap"]
+        if cap and key in _AN_HEAT_W and _an_heat(qkey, key, now, window) >= cap:
+            trip = ("heat", cap, False)
+    else:
+        limit = 1 if critical else _an_limit(cfg, key, cc["strict"])
+        if limit:
+            count = _an_hit(qkey, key, entry, now, window)
+            hl = cc["heat_limit"]
+            by_heat = bool(hl) and not critical and _an_heat(qkey, key, now, window) >= hl
+            if count >= limit or by_heat:
+                trip = (key if count >= limit else "heat", limit, critical)
+            w = _AN_HEAT_W.get(key)
+            if w:
+                if trip is None and cc["slow"] and _an3_slow_heat(qkey, w, now) >= cc["slow"]:
+                    trip = ("slow_nuke", cc["slow"], False)
+                swarm_actors = _an3_swarm_check(gid, uid, w, now, window, cc["swarm"])
+                if trip is None and uid in swarm_actors:
+                    trip = ("swarm", cc["swarm"], False)
+    if trip is None and not swarm_actors:
+        return
+    if trip is None:                       # swarm tripped by others' heat; this actor's share was too small
+        trip_key = None
+    else:
+        trip_key, limit, critical = trip
+    if trip_key is not None:
+        _AN_QUAR[qkey] = now                                    # set BEFORE any await
+    keep = AN3_SLOW_WINDOW if trip_key == "slow_nuke" else AN_RECENT_KEEP
+    recent = [(k, e) for (ts, k, e) in list(_AN_RECENT.get(qkey, ())) if now - ts <= keep]
+    decide_us = (time.perf_counter() - t0) * 1e6
+    via = _AN3_VIA.pop(eid, "gateway")
+
+    # swarm: every OTHER contributing attacker is punished in parallel, right now
+    if swarm_actors:
+        for other in swarm_actors:
+            okey = (gid, other)
+            if other == uid or other in cc["wl"] or (okey in _AN_QUAR and now - _AN_QUAR[okey] < AN_QUAR_SECONDS):
+                continue
+            _AN_QUAR[okey] = now
+            orecent = [(k, e) for (ts, k, e) in list(_AN_RECENT.get(okey, ())) if now - ts <= AN_RECENT_KEEP]
+            _an_spawn(_an_respond(guild, other, cfg, "swarm", False, cc["swarm"], entry, t0, orecent,
+                                  via=via, decide_us=decide_us))
+        _AN3_SWARM.pop(gid, None)
+
+    if trip_key is not None:
+        await _an_respond(guild, uid, cfg, trip_key, critical, limit, entry, t0, recent, via=via, decide_us=decide_us)
+
+
+async def _an_respond(guild, uid, cfg, key, critical, limit, entry, t0, recent, *, via="gateway", decide_us=0.0):
+    label = ANTINUKE_ACTION_LABELS.get(key, key)
+    force_ban = key in ("self_role_tamper", "self_role_perm_reduce", "swarm") or (critical and cfg.get("strict_mode", True))
+    _AN_LAST_TRIP[guild.id] = time.time()
+    if key == "bot_add":
+        _AN_DONE[entry.id] = time.time()          # recovery must not kick it a second time
+
+    # 1) punishment, recovery, lockdown and rogue-bot removal ALL start at the same instant
+    punish = asyncio.create_task(_an_punish(guild, uid, cfg, label, force_ban, module=key))
+    rec_task = _an_spawn(_an_recover(guild, recent, cfg)) if cfg.get("recovery", True) and recent else None
+    side = []                                    # tasks, not coroutines → they start NOW, beside the punishment
+    if (critical and cfg.get("lockdown_on_critical")) or cfg.get("lockdown_on_trip"):
+        side.append(asyncio.create_task(_an_lockdown(guild, cfg)))
+    if key == "bot_add":
+        side.append(asyncio.create_task(_an_kick_bot(guild, entry.target, label)))
+    took = await asyncio.gather(punish, return_exceptions=True)
+    punish_ms = (time.perf_counter() - t0) * 1000
+    took = took[0] if isinstance(took[0], str) else f"error: {took[0]!r}"
+    if side:
+        _an_report_errors(await asyncio.gather(*side, return_exceptions=True), "lockdown/bot-kick")
+    if "FAILED" in took or took.startswith("error"):
+        took = f"{took} → " + await _an_escalate(guild, cfg)
+    response_ms = (time.perf_counter() - t0) * 1000
+    detect_ms = max(0.0, (discord.utils.utcnow() - entry.created_at).total_seconds() * 1000)
+    _an3_metric(guild.id, key, via, decide_us, punish_ms, response_ms, detect_ms)
+
+    # 2) alert + owner DM run concurrently while recovery keeps working
+    notify = [_an_alert(guild, cfg, uid, label, key, critical, limit, took, detect_ms, punish_ms)]
+    if cfg.get("dm_owner", True):
+        notify.append(_an_dm_owner(guild, uid, label, took, punish_ms))
+    _an_report_errors(await asyncio.gather(*notify, return_exceptions=True), "alert/DM")
+
+    report = None
+    if rec_task is not None:
+        try:
+            report = await rec_task
+        except Exception:
+            traceback.print_exc()
+        if report and any(report.values()):
+            await _an_recovery_report(guild, cfg, report)
+    _an_record_incident(guild, uid, key, label, took, detect_ms, punish_ms, report)
+
+
+# ── concurrent flood sweep (replaces the sequential one) ─────────────────────
+async def _an_flood_sweep(guild: discord.Guild, action=None, via="flood") -> int:
+    """Pull recent audit entries and push every unseen one through the hot path concurrently.
+    Returns how many entries the gateway had NOT delivered yet."""
+    fresh = []
+    try:
+        kw = {"limit": 25 if action is None else 10}
+        if action is not None:
+            kw["action"] = action
+        async for e in guild.audit_logs(**kw):
+            if (discord.utils.utcnow() - e.created_at).total_seconds() > 30:
+                break
+            if e.id not in _AN_SEEN:
+                _AN3_VIA[e.id] = via
+                fresh.append(e)
+    except (discord.Forbidden, discord.HTTPException):
+        return 0
+    if fresh:
+        fresh.reverse()                                          # oldest first → counters fill in order
+        _an_report_errors(await asyncio.gather(*(on_audit_log_entry_create(e) for e in fresh),
+                                               return_exceptions=True), "flood sweep")
+    return len(fresh)
+
+
+# ── watchdog: don't wait for a flood if the audit event is late ──────────────
+async def _an3_watch(guild: discord.Guild, actions: tuple):
+    gid = guild.id
+    k = (gid, actions)
+    st = _AN3_WD_STATS.setdefault(gid, {"armed": 0, "sweeps": 0, "caught": 0})
+    st["armed"] += 1
+    t = time.time()
+    try:
+        await asyncio.sleep(AN3_WATCH_DELAY)
+        if max(_AN3_ARRIVE.get((gid, a), 0) for a in actions) >= t - 0.25:   # audit entry arrived → healthy
+            return
+        if time.time() - _AN3_WD_LAST.get(k, 0) < AN3_WATCH_COOLDOWN:
+            return
+        _AN3_WD_LAST[k] = time.time()
+        st["sweeps"] += 1
+        st["caught"] += await _an_flood_sweep(guild, actions[0] if len(actions) == 1 else None, via="watchdog")
+    finally:
+        _AN3_WD_PENDING.discard(k)
+
+
+def _an3_arm(guild, *actions):
+    if guild is None:
+        return
+    cfg = antinuke_config.get(str(guild.id))
+    if not cfg or not cfg.get("enabled") or not cfg.get("watchdog", True):
+        return
+    k = (guild.id, actions)
+    if k in _AN3_WD_PENDING:
+        return
+    _AN3_WD_PENDING.add(k)
+    _an_spawn(_an3_watch(guild, actions))
+
+
+@bot.listen("on_guild_channel_delete")
+async def _an3_wd_channel_delete(channel):
+    _an3_arm(channel.guild, _AAL.channel_delete)
+
+
+@bot.listen("on_guild_channel_create")
+async def _an3_wd_channel_create(channel):
+    _an3_arm(channel.guild, _AAL.channel_create)
+
+
+@bot.listen("on_guild_role_delete")
+async def _an3_wd_role_delete(role):
+    _an3_arm(role.guild, _AAL.role_delete)
+
+
+@bot.listen("on_guild_role_create")
+async def _an3_wd_role_create(role):
+    _an3_arm(role.guild, _AAL.role_create)
+
+
+@bot.listen("on_guild_role_update")
+async def _an3_wd_role_update(before, after):
+    if after.permissions.value & ~before.permissions.value & _AN_DANGER_MASK:
+        _an3_arm(after.guild, _AAL.role_update)
+
+
+@bot.listen("on_member_ban")
+async def _an3_wd_ban(guild, user):
+    _an3_arm(guild, _AAL.ban)
+
+
+@bot.listen("on_webhooks_update")
+async def _an3_wd_webhooks(channel):
+    _an3_arm(channel.guild, _AAL.webhook_create, _AAL.webhook_update, _AAL.webhook_delete)
+
+
+@bot.listen("on_guild_update")
+async def _an3_wd_guild_update(before, after):
+    watched = ("name", "icon", "banner", "vanity_url_code", "verification_level", "mfa_level",
+               "explicit_content_filter", "system_channel", "rules_channel", "public_updates_channel")
+    if any(getattr(before, a, None) != getattr(after, a, None) for a in watched):   # boosts etc. don't arm it
+        _an3_arm(after, _AAL.guild_update)
+
+
+@tasks.loop(seconds=60)
+async def _an3_housekeeping():
+    now = time.time()
+    for k in [k for k, dq in _AN3_SLOW.items() if not dq or now - dq[-1][0] > AN3_SLOW_WINDOW]:
+        _AN3_SLOW.pop(k, None)
+    for k in [k for k, dq in _AN3_SWARM.items() if not dq or now - dq[-1][0] > 120]:
+        _AN3_SWARM.pop(k, None)
+    for k in [k for k, ts in _AN3_ARRIVE.items() if now - ts > 900]:
+        _AN3_ARRIVE.pop(k, None)
+    for k in [k for k, ts in _AN3_WD_LAST.items() if now - ts > 900]:
+        _AN3_WD_LAST.pop(k, None)
+    if len(_AN3_VIA) > 5000:
+        _AN3_VIA.clear()
+
+
+@_an3_housekeeping.error
+async def _an3_hk_error(exc):
+    report_exception(exc, kind="loop", where="antinuke:v3 housekeeping")
+
+
+@bot.listen("on_ready")
+async def _an3_on_ready():
+    if not _an3_housekeeping.is_running():
+        _an3_housekeeping.start()
+
+
+# ── benchmark: the real decision path with a synthetic actor (no API calls) ──
+def _an3_bench(n: int = 20000) -> float:
+    """µs per event for compiled-config lookup + window counter + heat + slow-nuke + swarm bookkeeping."""
+    gid, uid, key = -7, -7, "channel_update"
+    cfg = {"whitelist": list(range(50)), "trust": {}, "window_seconds": 8, "strict_mode": True}
+    _AN3_CC.pop(gid, None)
+    base = time.time()
+    t = time.perf_counter()
+    for i in range(n):
+        now = base + i * 0.5                                  # spread out: never trips, measures the steady path
+        cc = _an3_cc(gid, cfg)
+        _ = uid in cc["wl"]
+        _an_hit((gid, uid), key, None, now, cc["window"])
+        _an_heat((gid, uid), key, now, cc["window"])
+        _an3_slow_heat((gid, uid), 1, now, 60)
+        _an3_swarm_check(gid, uid, 1, now, cc["window"], 10_000)
+    per = (time.perf_counter() - t) / n * 1e6
+    for d in (_AN_WIN, _AN_RECENT, _AN_HEAT, _AN3_SLOW):
+        for k in [k for k in d if (isinstance(k, tuple) and (k[0] == (gid, uid) or k == (gid, uid)))]:
+            d.pop(k, None)
+    _AN3_SWARM.pop(gid, None)
+    _AN3_CC.pop(gid, None)
+    return per
+
+
+# ── controls ─────────────────────────────────────────────────────────────────
+@_sh_sub("speed", ["perf", "latency"])
+async def cmd_shield_speed(ctx: commands.Context):
+    gid = ctx.guild.id
+    mine = [m for m in _AN3_METRICS if m["gid"] == gid]
+    rows = mine or list(_AN3_METRICS)
+    scope = "this server" if mine else ("all servers" if rows else "no trips yet")
+    per = _an3_bench(4000)        # on the loop on purpose: it touches the live engine dicts
+
+    def stat(field, unit, fmt="{:.0f}"):
+        xs = [m[field] for m in rows if m.get(field) is not None]
+        if not xs:
+            return "—"
+        return (f"p50 `{fmt.format(_an3_pct(xs, 50))}{unit}` · p95 `{fmt.format(_an3_pct(xs, 95))}{unit}` · "
+                f"best `{fmt.format(min(xs))}{unit}`")
+
+    wd = _AN3_WD_STATS.get(gid, {"armed": 0, "sweeps": 0, "caught": 0})
+    vias = {}
+    for m in rows:
+        vias[m["via"]] = vias.get(m["via"], 0) + 1
+    e = discord.Embed(title="⚡  Shield speed — engine v3 Turbo", color=C_CYAN, description=(
+        f"**Decision engine:** `{per:.1f} µs`/event · ~`{1e6 / max(per, 1e-9) / 1000:.0f}k` events/sec (live benchmark)\n"
+        f"**Gateway latency:** `{bot.latency * 1000:.0f} ms` · in-flight tasks `{len(_AN_TASKS)}`\n\n"
+        f"**Trips measured ({scope}):** {len(rows)}\n"
+        f"🧠 Decide: {stat('decide_us', ' µs')}\n"
+        f"🔨 Event → punishment landed: {stat('punish_ms', ' ms')}\n"
+        f"📡 Audit entry age when detected: {stat('detect_ms', ' ms')}\n"
+        f"🧾 Full response (incl. escalation): {stat('response_ms', ' ms')}\n"
+        f"Source: " + (" · ".join(f"{k} {v}" for k, v in vias.items()) or "—") + "\n\n"
+        f"**Watchdog:** {'ON' if get_antinuke_config(gid).get('watchdog', True) else 'OFF'} · armed `{wd['armed']}` · "
+        f"sweeps `{wd['sweeps']}` · late entries caught `{wd['caught']}`"))
+    e.set_footer(text="Punishment time is dominated by Discord's API round-trip — the bot's own work is the µs line.")
+    await send_v2(ctx, e)
+
+
+def _an3_toggle_limit(ctx, field, value, lo, hi, default, what):
+    cfg = get_antinuke_config(ctx.guild.id)
+    v = (value or "").lower()
+    if v == "off":
+        cfg[field] = 0
+    elif v.isdigit() and lo <= int(v) <= hi:
+        cfg[field] = int(v)
+    elif v in ("on", "default"):
+        cfg[field] = default
+    else:
+        return None
+    save_antinuke_config()
+    return cfg[field]
+
+
+@_sh_sub("swarm")
+async def cmd_shield_swarm(ctx: commands.Context, value: str = None):
+    cfg = get_antinuke_config(ctx.guild.id)
+    if value is None:
+        cur = cfg.get("swarm_limit", AN3_DEFAULT_SWARM)
+        return await send_v2(ctx, discord.Embed(title="🐝  Swarm detection", color=C_BLURPLE, description=(
+            f"Status: **{cur or 'off'}** server-wide heat in `{cfg.get('window_seconds', 8)}s` (needs ≥2 accounts)\n"
+            "Catches raids where many compromised admins each stay under their own limit — every contributing "
+            f"account is **banned at once**.\nSet: `{ctx.prefix}antinuke swarm <4-100|off|default>`")))
+    r = _an3_toggle_limit(ctx, "swarm_limit", value, 4, 100, AN3_DEFAULT_SWARM, "swarm")
+    if r is None:
+        return await _sh_err(ctx, "Usage: `antinuke swarm <4-100|off|default>` — combined heat of all non-whitelisted actors")
+    await _sh_ok(ctx, f"Swarm detection: **{r or 'off'}**.")
+
+
+@_sh_sub("slownuke", ["slow"])
+async def cmd_shield_slownuke(ctx: commands.Context, value: str = None):
+    cfg = get_antinuke_config(ctx.guild.id)
+    if value is None:
+        cur = cfg.get("slow_limit", AN3_DEFAULT_SLOW)
+        return await send_v2(ctx, discord.Embed(title="🐢  Slow-nuke detection", color=C_BLURPLE, description=(
+            f"Status: **{cur or 'off'}** heat per account in **{AN3_SLOW_WINDOW // 60} min**\n"
+            "Catches attackers who pace deletions to dodge the short window. Whitelisted users are exempt.\n"
+            f"Set: `{ctx.prefix}antinuke slownuke <6-500|off|default>`")))
+    r = _an3_toggle_limit(ctx, "slow_limit", value, 6, 500, AN3_DEFAULT_SLOW, "slow")
+    if r is None:
+        return await _sh_err(ctx, "Usage: `antinuke slownuke <6-500|off|default>`")
+    await _sh_ok(ctx, f"Slow-nuke budget: **{r or 'off'}** heat / {AN3_SLOW_WINDOW // 60} min.")
+
+
+@_sh_sub("watchdog", ["wd"])
+async def cmd_shield_watchdog(ctx: commands.Context, state: str = None):
+    cfg = get_antinuke_config(ctx.guild.id)
+    if state is None:
+        return await _sh_ok(ctx, f"Watchdog is **{'ON' if cfg.get('watchdog', True) else 'OFF'}** — a late audit entry "
+                                 f"triggers my own audit-log pull after `{AN3_WATCH_DELAY}s`. `antinuke watchdog on|off`")
+    flag = _parse_toggle(state)
+    if flag is None:
+        return await _sh_err(ctx, "Usage: `antinuke watchdog on|off`")
+    cfg["watchdog"] = flag
+    save_antinuke_config()
+    await _sh_ok(ctx, f"Watchdog **{'ON' if flag else 'OFF'}**.")
+
+
+@_sh_sub("scan", ["audit", "risk"])
+async def cmd_shield_scan(ctx: commands.Context):
+    """Permission risk audit — who could nuke this server, and could I stop them?"""
+    g, cfg = ctx.guild, get_antinuke_config(ctx.guild.id)
+    cc = _an3_cc(g.id, cfg)
+    danger_roles = [r for r in g.roles if not r.is_default() and r.permissions.value & _AN_DANGER_MASK_ROLE]
+    admin_roles = [r for r in danger_roles if r.permissions.administrator]
+    holders = {m for r in danger_roles for m in r.members if m.id != g.owner_id}
+    bots = [m for m in holders if m.bot and m.id != bot.user.id]
+    outrank = [m for m in holders if not m.bot and m.top_role >= g.me.top_role]
+    unlisted = [m for m in holders if not m.bot and m.id not in cc["wl"] and m.id not in cc["trust"]]
+    everyone_bad = g.default_role.permissions.value & _AN_DANGER_MASK
+    score = 100
+    score -= 25 if not cfg.get("enabled") else 0
+    score -= min(30, 10 * len(outrank))
+    score -= min(20, 5 * len(bots))
+    score -= 25 if everyone_bad else 0
+    score -= 10 if not cfg.get("recovery", True) else 0
+    score -= 5 if not cfg.get("watchdog", True) else 0
+    score = max(0, score)
+    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 55 else "D" if score >= 35 else "F"
+
+    def names(ms, n=8):
+        return ", ".join(m.mention for m in list(ms)[:n]) + (f" +{len(ms) - n}" if len(ms) > n else "") if ms else "none"
+
+    fixes = []
+    if not cfg.get("enabled"):
+        fixes.append(f"arm the shield: `{ctx.prefix}antinuke on`")
+    if outrank:
+        fixes.append("drag my role **above** every staff role — I can't punish members who outrank me")
+    if everyone_bad:
+        fixes.append("@everyone has dangerous permissions — remove them now")
+    if bots:
+        fixes.append("review bots with dangerous perms — a compromised bot token is a classic nuke vector")
+    if unlisted:
+        fixes.append(f"whitelist / trust staff you rely on (`{ctx.prefix}antinuke trust`) — otherwise they trip like anyone else")
+    e = discord.Embed(title=f"🔍  Shield scan — grade {grade} ({score}/100)",
+                      color=C_GREEN if score >= 75 else C_ORANGE if score >= 50 else C_DARKRED, description=(
+        f"**Dangerous roles:** {len(danger_roles)} ({len(admin_roles)} with Administrator)\n"
+        f"**Members holding them:** {len(holders)} · not whitelisted/trusted: {len(unlisted)}\n"
+        f"**Outrank me (unpunishable):** {names(outrank)}\n"
+        f"**Bots with dangerous perms:** {names(bots)}\n"
+        f"**@everyone dangerous perms:** {'⚠️ YES' if everyone_bad else '✅ no'}\n"
+        f"**Engine:** {'armed' if cfg.get('enabled') else 'OFF'} · strict {'on' if cc['strict'] else 'off'} · "
+        f"swarm {cc['swarm'] or 'off'} · slow-nuke {cc['slow'] or 'off'} · watchdog {'on' if cfg.get('watchdog', True) else 'off'}"
+        + ("\n\n**Fix list**\n" + "\n".join(f"• {f}" for f in fixes) if fixes else "\n\n✅ Nothing to fix.")))
+    await send_v2(ctx, e)
+
+
+@_sh_sub("engine", ["v3", "turbo"])
+async def cmd_shield_engine(ctx: commands.Context):
+    p = ctx.prefix
+    await send_v2(ctx, discord.Embed(title="⚡  Antinuke Engine v3 — Turbo", color=C_CYAN, description=(
+        "**Faster**\n• compiled config → O(1) hot path · µs-level decisions\n"
+        "• recovery starts in parallel with the punishment\n• disk writes moved off the event loop\n"
+        f"• watchdog pulls the audit log itself after `{AN3_WATCH_DELAY}s` if Discord's audit event is late\n"
+        "• flood sweeps process every entry concurrently\n\n"
+        "**Smarter**\n• 🐝 swarm detection — many accounts, one attack, all banned at once\n"
+        f"• 🐢 slow-nuke budget over {AN3_SLOW_WINDOW // 60} min\n\n"
+        f"`{p}antinuke speed` · `{p}antinuke scan` · `{p}antinuke swarm` · `{p}antinuke slownuke` · `{p}antinuke watchdog`")))
+
+
+_ANTINUKE_FORWARD.update({"speed", "swarm", "slownuke", "watchdog", "scan", "engine"})
+HELP_PAGES["shield"]["content"] += (
+    "\n**⚡ Engine v3 Turbo**\n"
+    "`⟦P⟧antinuke speed` — live latency stats (p50/p95) + decision benchmark\n"
+    "`⟦P⟧antinuke scan` — permission risk audit with a grade and fix list\n"
+    "`⟦P⟧antinuke swarm <n|off>` — catch multi-account attacks · `⟦P⟧antinuke slownuke <n|off>` — 30-min heat budget\n"
+    "`⟦P⟧antinuke watchdog on|off` — self-pull the audit log when Discord's audit event is late")
+HELP_NEW.add("shield")
+_COMMAND_META_CACHE = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🚀  ARCADE PRO  (added in bot-49 / v6.1.0) — new games + cross-game profile
+#  ,crash <bet>            live multiplier rocket — cash out before it explodes
+#  ,towers <bet> [mode]    climb 8 floors picking safe doors, cash out any floor
+#  ,c4bot [easy|normal|hard] four-in-a-row vs an alpha-beta AI (bitboards, iterative deepening)
+#  ,lights [3-5]           light-toggle puzzle on a button grid, with a GF(2) solver for hints
+#  ,dicepoker <bet>        5 dice vs the bot, hold & reroll once
+#  ,gameprofile [@user]    every game you've played in one card · ,arcadelb overall leaderboard
+#  Stats feed the same store as ,gamelb (so ,gamelb crash works). Coins use the economy wallet.
+# ══════════════════════════════════════════════════════════════════════════════
+import secrets as _gx_secrets
+
+_GX_ACTIVE: set = set()                   # (game, uid) — one running round per game per user
+_GX_MAX_BET = 1_000_000
+_GX_RNG = random.SystemRandom()           # outcomes can't be predicted from the bot's PRNG state
+
+
+async def _gx_error(ctx, error):
+    orig = getattr(error, "original", error)
+    if isinstance(orig, commands.BadArgument):
+        try:
+            return await send_v2(ctx, discord.Embed(description=f"❌  {orig}", color=C_DARKRED))
+        except (discord.Forbidden, discord.HTTPException):
+            return
+    await _studio_error_handler(ctx, error)
+
+
+async def _gx_open(ctx, view, refund: int = 0, active_key=None):
+    """Send the game card; if Discord refuses it, give the stake back instead of eating it."""
+    try:
+        return await ctx.send(view=view)
+    except discord.HTTPException:
+        if refund:
+            _gx_pay(ctx.guild, ctx.author.id, refund)
+        if active_key:
+            _GX_ACTIVE.discard(active_key)
+        raise
+
+
+def _gx_cmd(name: str, *, aliases=(), cooldown=(1, 4.0)):
+    """Register only if the name is free (never overrides an existing command)."""
+    def deco(fn):
+        if bot.get_command(name) is not None:
+            return fn
+        f = commands.cooldown(cooldown[0], cooldown[1], commands.BucketType.user)(fn)
+        f = commands.guild_only()(f)
+        cmd = bot.command(name=name, aliases=[a for a in aliases if bot.get_command(a) is None])(f)
+        cmd.error(_gx_error)
+        return cmd
+    return deco
+
+
+def gx_parse_bet(raw: str, balance: int) -> int:
+    """'500' · '2.5k' · 'all' · 'half' · '25%' → coins (validated against the wallet)."""
+    t = (raw or "").strip().lower().replace(",", "")
+    if t in ("all", "max", "allin"):
+        v = balance
+    elif t == "half":
+        v = balance // 2
+    else:
+        try:
+            if t.endswith("%"):
+                v = int(balance * float(t[:-1]) / 100)
+            else:
+                mult = 1_000 if t.endswith("k") else 1_000_000 if t.endswith("m") else 1
+                v = int(float(t.rstrip("km")) * mult)
+        except ValueError:
+            raise commands.BadArgument(f"`{raw}` isn't a bet — use a number, `half`, `all` or `25%`.")
+    if v < 10:
+        raise commands.BadArgument("Minimum bet is **10** 🪙.")
+    if v > _GX_MAX_BET:
+        raise commands.BadArgument(f"Maximum bet is **{_GX_MAX_BET:,}** 🪙.")
+    if v > balance:
+        raise commands.BadArgument(f"You only have **{balance:,}** 🪙.")
+    return v
+
+
+def _gx_take(ctx, raw: str) -> int:
+    w = get_wallet(ctx.guild.id, ctx.author.id)
+    bet = gx_parse_bet(raw, int(w["coins"]))
+    w["coins"] -= bet
+    save_economy()
+    return bet
+
+
+def _gx_pay(guild, uid: int, amount: int):
+    if amount > 0:
+        get_wallet(guild.id, uid)["coins"] += int(amount)
+        save_economy()
+
+
+def _gx_stat(guild, uid: int, game: str, won: bool):
+    s = _gw(guild.id, uid, game)
+    s["plays"] += 1
+    if won:
+        s["wins"] += 1
+    _save_word_stats()
+
+
+def _gx_view(text: str, color: int, rows=(), timeout=None, owner_view=None):
+    """Builds a Components V2 card: text + optional action rows."""
+    v = owner_view or discord.ui.LayoutView(timeout=timeout)
+    v.clear_items()
+    c = discord.ui.Container(accent_color=discord.Colour(color))
+    c.add_item(discord.ui.TextDisplay(text))
+    for r in rows:
+        c.add_item(discord.ui.ActionRow(*r))
+    v.add_item(c)
+    return v
+
+
+class _GXOwnedView(discord.ui.LayoutView):
+    def __init__(self, owner_id: int, timeout: float = 120):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This isn't your game — start your own!", ephemeral=True)
+            return False
+        return True
+
+
+# ═════════════════════════ 🚀 CRASH ═════════════════════════
+GX_CRASH_EDGE = 0.03          # 3 % house edge
+GX_CRASH_RATE = 0.085         # multiplier = e^(rate · seconds) → 2× at ~8 s, 10× at ~27 s
+GX_CRASH_CAP = 100.0
+
+
+def gx_crash_point(u: float | None = None) -> float:
+    """Crash multiplier with a fixed house edge: P(crash ≥ x) = (1-edge)/x."""
+    u = _GX_RNG.random() if u is None else u
+    if u < GX_CRASH_EDGE:
+        return 1.00
+    return min(GX_CRASH_CAP, max(1.00, math.floor((1 - GX_CRASH_EDGE) / (1 - u) * 100) / 100))
+
+
+def gx_crash_mult(elapsed: float) -> float:
+    return math.floor(math.exp(GX_CRASH_RATE * max(0.0, elapsed)) * 100) / 100
+
+
+class _GXCrashView(_GXOwnedView):
+    def __init__(self, owner_id, bet):
+        super().__init__(owner_id, timeout=90)
+        self.bet, self.cashed, self.lock = bet, None, asyncio.Lock()
+        self.start = None
+        self.crash_at = gx_crash_point()
+
+    def render(self, mult, state):
+        bar_n = min(20, int(math.log(max(mult, 1.0), 1.25)))
+        rocket = "▰" * bar_n + "▱" * (20 - bar_n)
+        if state == "live":
+            txt = (f"## 🚀 Crash — **{mult:.2f}×**\n`{rocket}`\nBet **{self.bet:,}** 🪙 → cash out now for "
+                   f"**{int(self.bet * mult):,}** 🪙")
+            btn = discord.ui.Button(label=f"Cash out {mult:.2f}×", emoji="💰", style=discord.ButtonStyle.success)
+            btn.callback = self.cash
+            return _gx_view(txt, C_GOLD, [[btn]], owner_view=self)
+        if state == "cashed":
+            txt = (f"## 💰 Cashed out at **{self.cashed:.2f}×**\nWon **{int(self.bet * self.cashed):,}** 🪙 "
+                   f"(+{int(self.bet * self.cashed) - self.bet:,}) · rocket blew at **{self.crash_at:.2f}×**")
+            return _gx_view(txt, C_GREEN, owner_view=self)
+        txt = f"## 💥 Crashed at **{self.crash_at:.2f}×**\nLost **{self.bet:,}** 🪙 — cash out sooner next time!"
+        return _gx_view(txt, C_DARKRED, owner_view=self)
+
+    async def cash(self, interaction: discord.Interaction):
+        async with self.lock:
+            mult = gx_crash_mult(time.monotonic() - self.start)
+            if self.cashed is None and mult < self.crash_at:
+                self.cashed = mult
+        if self.cashed is not None:                     # instant feedback; the game loop pays out
+            await interaction.response.edit_message(view=self.render(self.cashed, "cashed"))
+        else:
+            await interaction.response.defer()
+
+
+@_gx_cmd("crash", aliases=["rocket"], cooldown=(1, 5.0))
+async def cmd_gx_crash(ctx, bet: str):
+    """,crash <bet> — the multiplier climbs; cash out before the rocket explodes"""
+    if ("crash", ctx.author.id) in _GX_ACTIVE:
+        raise commands.BadArgument("You already have a rocket in the air.")
+    amount = _gx_take(ctx, bet)
+    _GX_ACTIVE.add(("crash", ctx.author.id))
+    view = _GXCrashView(ctx.author.id, amount)
+    try:
+        view.start = time.monotonic()
+        msg = await _gx_open(ctx, view.render(1.0, "live"), refund=amount)
+        while True:
+            await asyncio.sleep(1.1)
+            async with view.lock:
+                mult = gx_crash_mult(time.monotonic() - view.start)
+                done = view.cashed is not None or mult >= view.crash_at
+            if done:
+                break
+            try:
+                await msg.edit(view=view.render(mult, "live"))
+            except discord.HTTPException:
+                pass
+        won = view.cashed is not None
+        if won:
+            _gx_pay(ctx.guild, ctx.author.id, int(amount * view.cashed))
+        _gx_stat(ctx.guild, ctx.author.id, "crash", won)
+        await msg.edit(view=view.render(view.cashed or view.crash_at, "cashed" if won else "crashed"))
+        view.stop()
+    finally:
+        _GX_ACTIVE.discard(("crash", ctx.author.id))
+
+
+# ═════════════════════════ 🗼 TOWERS ═════════════════════════
+GX_TOWER_FLOORS = 8
+GX_TOWER_MODES = {"easy": (3, 1), "normal": (2, 1), "hard": (3, 2)}     # (doors, traps)
+GX_TOWER_EDGE = 0.97
+
+
+def gx_tower_step(mode: str) -> float:
+    doors, traps = GX_TOWER_MODES[mode]
+    return GX_TOWER_EDGE * doors / (doors - traps)
+
+
+class _GXTowerView(_GXOwnedView):
+    def __init__(self, ctx, bet, mode):
+        super().__init__(ctx.author.id, timeout=120)
+        self.ctx, self.bet, self.mode = ctx, bet, mode
+        self.doors, self.traps = GX_TOWER_MODES[mode]
+        self.floor, self.over, self.history = 0, False, []
+        self.layout = [set(_GX_RNG.sample(range(self.doors), self.traps)) for _ in range(GX_TOWER_FLOORS)]
+        self.message = None
+
+    def mult(self, floors=None):
+        return round(gx_tower_step(self.mode) ** (self.floor if floors is None else floors), 4)
+
+    def board(self, reveal=False):
+        rows = []
+        for f in range(GX_TOWER_FLOORS - 1, -1, -1):
+            cells = []
+            for d in range(self.doors):
+                if f < len(self.history):
+                    picked = self.history[f]
+                    cells.append(("💥" if d in self.layout[f] else "✅") if d == picked else
+                                 ("💣" if reveal and d in self.layout[f] else "⬛"))
+                elif reveal:
+                    cells.append("💣" if d in self.layout[f] else "▫️")
+                else:
+                    cells.append("🟦" if f == self.floor and not self.over else "⬛")
+            rows.append(f"`{f + 1}` " + " ".join(cells) + f"  ×{self.mult(f + 1):.2f}")
+        return "\n".join(rows)
+
+    def render(self, status=""):
+        head = (f"## 🗼 Towers · {self.mode} · bet {self.bet:,} 🪙\n"
+                f"Floor **{self.floor}/{GX_TOWER_FLOORS}** · current **×{self.mult():.2f}** = **{int(self.bet * self.mult()):,}** 🪙")
+        txt = f"{head}\n{self.board(reveal=self.over)}" + (f"\n{status}" if status else "")
+        if self.over:
+            return _gx_view(txt, C_GREEN if "💰" in status or "🏆" in status else C_DARKRED, owner_view=self)
+        btns = []
+        for d in range(self.doors):
+            b = discord.ui.Button(label=f"Door {d + 1}", emoji="🚪", style=discord.ButtonStyle.secondary)
+            b.callback = self._pick(d)
+            btns.append(b)
+        co = discord.ui.Button(label="Cash out", emoji="💰", style=discord.ButtonStyle.success, disabled=self.floor == 0)
+        co.callback = self._cash
+        return _gx_view(txt, C_PURPLE, [btns, [co]], owner_view=self)
+
+    def _finish(self, won: bool, payout: int):
+        self.over = True
+        _gx_pay(self.ctx.guild, self.ctx.author.id, payout)
+        _gx_stat(self.ctx.guild, self.ctx.author.id, "towers", won)
+        _GX_ACTIVE.discard(("towers", self.ctx.author.id))
+        self.stop()
+
+    def _pick(self, d):
+        async def cb(interaction):
+            if self.over:
+                return await interaction.response.defer()
+            self.history.append(d)
+            if d in self.layout[self.floor]:
+                self._finish(False, 0)
+                return await interaction.response.edit_message(view=self.render(f"💥 Trap on floor {self.floor + 1}! Lost **{self.bet:,}** 🪙"))
+            self.floor += 1
+            if self.floor >= GX_TOWER_FLOORS:
+                pay = int(self.bet * self.mult())
+                self._finish(True, pay)
+                return await interaction.response.edit_message(view=self.render(f"🏆 Top of the tower! Won **{pay:,}** 🪙"))
+            await interaction.response.edit_message(view=self.render())
+        return cb
+
+    async def _cash(self, interaction):
+        if self.over or self.floor == 0:
+            return await interaction.response.defer()
+        pay = int(self.bet * self.mult())
+        self._finish(True, pay)
+        await interaction.response.edit_message(view=self.render(f"💰 Cashed out — won **{pay:,}** 🪙"))
+
+    async def on_timeout(self):
+        if not self.over:                       # walked away → auto cash-out what's banked
+            pay = int(self.bet * self.mult()) if self.floor else self.bet
+            self._finish(self.floor > 0, pay)
+            if self.message:
+                try:
+                    await self.message.edit(view=self.render(f"⏰ Timed out — auto-cashed **{pay:,}** 🪙"))
+                except discord.HTTPException:
+                    pass
+
+
+@_gx_cmd("towers", aliases=["tower"], cooldown=(1, 4.0))
+async def cmd_gx_towers(ctx, bet: str, mode: str = "normal"):
+    """,towers <bet> [easy|normal|hard] — climb 8 floors, avoid the traps, cash out whenever"""
+    mode = mode.lower()
+    if mode not in GX_TOWER_MODES:
+        raise commands.BadArgument("Mode must be `easy`, `normal` or `hard`.")
+    if ("towers", ctx.author.id) in _GX_ACTIVE:
+        raise commands.BadArgument("Finish your current tower first.")
+    amount = _gx_take(ctx, bet)
+    _GX_ACTIVE.add(("towers", ctx.author.id))
+    view = _GXTowerView(ctx, amount, mode)
+    view.message = await _gx_open(ctx, view.render(), refund=amount, active_key=("towers", ctx.author.id))
+
+
+# ═════════════════════════ 🔴 FOUR-IN-A-ROW vs AI (bitboards) ═════════════════════════
+#  Column-major bitboard, 7 bits per column (6 cells + 1 sentinel). `pos` = stones of the side to move,
+#  `mask` = all stones. Negamax + alpha-beta, centre-first move ordering, threat-count heuristic,
+#  iterative deepening under a time budget — runs in a worker thread so the bot never stalls.
+GX_W, GX_H = 7, 6
+GX_H1 = GX_H + 1
+GX_BOTTOM = sum(1 << (c * GX_H1) for c in range(GX_W))
+GX_FULL = GX_BOTTOM * ((1 << GX_H) - 1)
+GX_ORDER = (3, 2, 4, 1, 5, 0, 6)
+
+
+def gx_top(c):
+    return 1 << (GX_H - 1 + c * GX_H1)
+
+
+def gx_bottom(c):
+    return 1 << (c * GX_H1)
+
+
+def gx_colmask(c):
+    return ((1 << GX_H) - 1) << (c * GX_H1)
+
+
+def gx_can_play(mask, c):
+    return not (mask & gx_top(c))
+
+
+def gx_won(p) -> bool:
+    for s in (1, GX_H1, GX_H1 - 1, GX_H1 + 1):
+        m = p & (p >> s)
+        if m & (m >> (2 * s)):
+            return True
+    return False
+
+
+def gx_play(pos, mask, c):
+    """→ (new pos for the side to move next, new mask)."""
+    return pos ^ mask, mask | (mask + gx_bottom(c))
+
+
+def gx_winning_move(pos, mask, c) -> bool:
+    return gx_won(pos | ((mask + gx_bottom(c)) & gx_colmask(c)))
+
+
+def _gx_threats(p, mask) -> int:
+    """Empty cells that would complete four for stones `p` (Pons' winning-position trick)."""
+    r = (p << 1) & (p << 2) & (p << 3)
+    for s in (GX_H1, GX_H1 - 1, GX_H1 + 1):
+        t = (p << s) & (p << 2 * s)
+        r |= t & (p << 3 * s)
+        r |= t & (p >> s)
+        t = (p >> s) & (p >> 2 * s)
+        r |= t & (p << s)
+        r |= t & (p >> 3 * s)
+    return bin(r & (GX_FULL ^ mask)).count("1")
+
+
+_GX_CENTER = sum(1 << (3 * GX_H1 + r) for r in range(GX_H))
+
+
+def _gx_eval(pos, mask) -> int:
+    opp = pos ^ mask
+    return (4 * (_gx_threats(pos, mask) - _gx_threats(opp, mask))
+            + bin(pos & _GX_CENTER).count("1") - bin(opp & _GX_CENTER).count("1"))
+
+
+class _GXTimeout(Exception):
+    pass
+
+
+def _gx_negamax(pos, mask, moves, depth, a, b, deadline, nodes):
+    nodes[0] += 1
+    if nodes[0] & 1023 == 0 and time.perf_counter() > deadline:
+        raise _GXTimeout
+    if moves >= GX_W * GX_H:
+        return 0
+    for c in GX_ORDER:
+        if gx_can_play(mask, c) and gx_winning_move(pos, mask, c):
+            return 1000 - moves
+    if depth == 0:
+        return _gx_eval(pos, mask)
+    best = -10_000
+    for c in GX_ORDER:
+        if not gx_can_play(mask, c):
+            continue
+        np_, nm = gx_play(pos, mask, c)
+        score = -_gx_negamax(np_, nm, moves + 1, depth - 1, -b, -a, deadline, nodes)
+        if score > best:
+            best = score
+        if score > a:
+            a = score
+        if a >= b:
+            break
+    return best
+
+
+def gx_best_move(pos, mask, moves, level="normal", budget=1.2):
+    legal = [c for c in GX_ORDER if gx_can_play(mask, c)]
+    if not legal:
+        return None, 0
+    for c in legal:                                   # always take a win
+        if gx_winning_move(pos, mask, c):
+            return c, 1
+    opp = pos ^ mask
+    threats = [c for c in legal if gx_winning_move(opp, mask, c)]
+    if threats and level != "easy":                   # must block — even when the search says it's lost anyway
+        return threats[0], 1
+    if level == "easy" and _GX_RNG.random() < 0.35:
+        return _GX_RNG.choice(legal), 0
+    max_depth = {"easy": 2, "normal": 4, "hard": 12}.get(level, 4)
+    deadline = time.perf_counter() + (budget if level == "hard" else 5.0)
+    best, depth_done = legal[0], 0
+    for depth in range(1, max_depth + 1):
+        nodes = [0]
+        try:
+            scored = []
+            a = -10_000
+            for c in legal:
+                np_, nm = gx_play(pos, mask, c)
+                s = -_gx_negamax(np_, nm, moves + 1, depth - 1, -10_000, -a, deadline, nodes)
+                scored.append((s, c))
+                a = max(a, s)
+            best = max(scored, key=lambda t: (t[0], -GX_ORDER.index(t[1])))[1]
+            depth_done = depth
+            if max(s for s, _ in scored) >= 900:      # forced win found
+                break
+        except _GXTimeout:
+            break
+    return best, depth_done
+
+
+class _GXC4View(_GXOwnedView):
+    def __init__(self, ctx, level):
+        super().__init__(ctx.author.id, timeout=180)
+        self.ctx, self.level = ctx, level
+        self.mask, self.human, self.moves = 0, 0, 0
+        self.over, self.busy = False, False
+        self.status = "Your move — you are 🔴"
+        self.message = None
+
+    def cell(self, c, r):
+        bit = 1 << (c * GX_H1 + r)
+        if not self.mask & bit:
+            return "⚫"
+        return "🔴" if self.human & bit else "🟡"
+
+    def render(self, color=C_BLURPLE):
+        grid = "\n".join(" ".join(self.cell(c, r) for c in range(GX_W)) for r in range(GX_H - 1, -1, -1))
+        txt = f"## 🔴 Four in a row vs AI · {self.level}\n{grid}\n1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣\n{self.status}"
+        if self.over:
+            return _gx_view(txt, color, owner_view=self)
+        btns = []
+        for c in range(GX_W):
+            b = discord.ui.Button(label=str(c + 1), style=discord.ButtonStyle.secondary,
+                                  disabled=self.busy or not gx_can_play(self.mask, c))
+            b.callback = self._move(c)
+            btns.append(b)
+        return _gx_view(txt, color, [btns[:4], btns[4:]], owner_view=self)
+
+    def _end(self, won, text, color):
+        self.over, self.status = True, text
+        reward = {"easy": 40, "normal": 120, "hard": 400}[self.level] if won else 0
+        if reward:
+            _gx_pay(self.ctx.guild, self.ctx.author.id, reward)
+            self.status += f" · +{reward} 🪙"
+        _gx_stat(self.ctx.guild, self.ctx.author.id, "c4bot", won)
+        self.stop()
+        return self.render(color)
+
+    def _move(self, c):
+        async def cb(interaction):
+            if self.over or self.busy or not gx_can_play(self.mask, c):
+                return await interaction.response.defer()
+            # human move — `pos` for the side to move is mask ^ (other side's stones)
+            self.human |= (self.mask + gx_bottom(c)) & gx_colmask(c)
+            self.mask |= self.mask + gx_bottom(c)
+            self.moves += 1
+            if gx_won(self.human):
+                return await interaction.response.edit_message(view=self._end(True, "🏆 **You win!**", C_GREEN))
+            if self.moves >= GX_W * GX_H:
+                return await interaction.response.edit_message(view=self._end(False, "🤝 Draw.", C_GOLD))
+            self.busy, self.status = True, "🤔 AI is thinking…"
+            await interaction.response.edit_message(view=self.render())
+            bot_pos = self.mask ^ self.human
+            t = time.perf_counter()
+            col, depth = await asyncio.to_thread(gx_best_move, bot_pos, self.mask, self.moves, self.level)
+            took = (time.perf_counter() - t) * 1000
+            self.mask |= self.mask + gx_bottom(col)
+            self.moves += 1
+            self.busy = False
+            if gx_won(self.mask ^ self.human):
+                view = self._end(False, f"🤖 AI wins (column {col + 1}).", C_DARKRED)
+            elif self.moves >= GX_W * GX_H:
+                view = self._end(False, "🤝 Draw.", C_GOLD)
+            else:
+                self.status = f"AI played **{col + 1}** (depth {depth}, {took:.0f} ms) — your move 🔴"
+                view = self.render()
+            await interaction.edit_original_response(view=view)
+        return cb
+
+
+@_gx_cmd("c4bot", aliases=["fourbot", "c4ai"], cooldown=(1, 5.0))
+async def cmd_gx_c4bot(ctx, level: str = "normal"):
+    """,c4bot [easy|normal|hard] — four in a row against an alpha-beta search AI"""
+    level = level.lower()
+    if level not in ("easy", "normal", "hard"):
+        raise commands.BadArgument("Level must be `easy`, `normal` or `hard`.")
+    view = _GXC4View(ctx, level)
+    view.message = await ctx.send(view=view.render())
+
+
+# ═════════════════════════ 💡 LIGHTS (toggle puzzle + GF(2) solver) ═════════════════════════
+def gx_lights_press(state: int, n: int, i: int) -> int:
+    r, c = divmod(i, n)
+    for rr, cc in ((r, c), (r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+        if 0 <= rr < n and 0 <= cc < n:
+            state ^= 1 << (rr * n + cc)
+    return state
+
+
+def gx_lights_solve(state: int, n: int):
+    """Minimum-press solution as a bitmask over cells (Gaussian elimination over GF(2), then the
+    lightest member of the null-space coset). Returns None if unsolvable."""
+    N = n * n
+    rows = []
+    for i in range(N):                                  # equation i: presses affecting cell i == light i
+        eq = 0
+        for j in range(N):
+            if gx_lights_press(0, n, j) >> i & 1:
+                eq |= 1 << j
+        rows.append([eq, state >> i & 1])
+    pivots, r = [], 0
+    for col in range(N):
+        piv = next((k for k in range(r, N) if rows[k][0] >> col & 1), None)
+        if piv is None:
+            continue
+        rows[r], rows[piv] = rows[piv], rows[r]
+        for k in range(N):
+            if k != r and rows[k][0] >> col & 1:
+                rows[k][0] ^= rows[r][0]
+                rows[k][1] ^= rows[r][1]
+        pivots.append(col)
+        r += 1
+    if any(rows[k][1] and not rows[k][0] for k in range(r, N)):
+        return None
+    free = [c for c in range(N) if c not in pivots]
+    best = None
+    for combo in range(1 << len(free)):
+        x = 0
+        for bi, fc in enumerate(free):
+            if combo >> bi & 1:
+                x |= 1 << fc
+        for k, pc in enumerate(pivots):
+            val = rows[k][1] ^ (bin(rows[k][0] & x & ~(1 << pc)).count("1") & 1)
+            if val:
+                x |= 1 << pc
+        if best is None or bin(x).count("1") < bin(best).count("1"):
+            best = x
+    return best
+
+
+class _GXLightsView(_GXOwnedView):
+    def __init__(self, ctx, n):
+        super().__init__(ctx.author.id, timeout=300)
+        self.ctx, self.n = ctx, n
+        self.state = 0
+        while self.state == 0:
+            presses = _GX_RNG.sample(range(n * n), k=max(3, n * n // 3))
+            for i in presses:
+                self.state = gx_lights_press(self.state, n, i)
+        self.par = bin(gx_lights_solve(self.state, n) or 0).count("1")
+        self.moves, self.hints, self.over, self.hint_cell = 0, 0, False, None
+
+    def render(self, status=""):
+        lit = bin(self.state).count("1")
+        txt = (f"## 💡 Lights · {self.n}×{self.n}\nTurn **every** light off. Each press flips a cell and its 4 neighbours.\n"
+               f"Moves **{self.moves}** · par **{self.par}** · lit **{lit}** · hints {self.hints}" + (f"\n{status}" if status else ""))
+        rows = []
+        for r in range(self.n):
+            row = []
+            for c in range(self.n):
+                i = r * self.n + c
+                on = self.state >> i & 1
+                b = discord.ui.Button(label="​", emoji="🟨" if on else "⬛",
+                                      style=discord.ButtonStyle.primary if i == self.hint_cell else discord.ButtonStyle.secondary,
+                                      disabled=self.over)
+                b.callback = self._press(i)
+                row.append(b)
+            rows.append(row)
+        if not self.over:
+            h = discord.ui.Button(label="Hint", emoji="🧠", style=discord.ButtonStyle.success)
+            h.callback = self._hint
+            q = discord.ui.Button(label="Give up", emoji="🏳️", style=discord.ButtonStyle.danger)
+            q.callback = self._quit
+            rows.append([h, q])
+        return _gx_view(txt, C_GREEN if self.over and not self.state else C_GOLD, rows, owner_view=self)
+
+    def _press(self, i):
+        async def cb(interaction):
+            if self.over:
+                return await interaction.response.defer()
+            self.state = gx_lights_press(self.state, self.n, i)
+            self.moves += 1
+            self.hint_cell = None
+            status = ""
+            if self.state == 0:
+                self.over = True
+                reward = max(10, (self.n * 25) - max(0, self.moves - self.par) * 3 - self.hints * 15)
+                _gx_pay(self.ctx.guild, self.ctx.author.id, reward)
+                _gx_stat(self.ctx.guild, self.ctx.author.id, "lights", True)
+                status = f"🎉 Solved in **{self.moves}** moves (par {self.par}) · +{reward} 🪙"
+                self.stop()
+            await interaction.response.edit_message(view=self.render(status))
+        return cb
+
+    async def _hint(self, interaction):
+        sol = gx_lights_solve(self.state, self.n)
+        self.hints += 1
+        self.hint_cell = (sol & -sol).bit_length() - 1 if sol else None
+        await interaction.response.edit_message(view=self.render(
+            f"🧠 Optimal solution needs **{bin(sol or 0).count('1')}** more presses — try the highlighted cell."))
+
+    async def _quit(self, interaction):
+        self.over = True
+        _gx_stat(self.ctx.guild, self.ctx.author.id, "lights", False)
+        self.stop()
+        await interaction.response.edit_message(view=self.render("🏳️ Gave up."))
+
+
+@_gx_cmd("lights", aliases=["lightsgrid", "togglegrid"], cooldown=(1, 5.0))
+async def cmd_gx_lights(ctx, size: int = 4):
+    """,lights [3-5] — switch every light off; hints come from a linear-algebra solver"""
+    if not 3 <= size <= 5:
+        raise commands.BadArgument("Size must be 3, 4 or 5.")
+    await ctx.send(view=_GXLightsView(ctx, size).render())
+
+
+# ═════════════════════════ 🎲 DICE POKER ═════════════════════════
+_GX_DIE = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
+_GX_HANDS = ["High die", "One pair", "Two pair", "Three of a kind", "Straight", "Full house", "Four of a kind", "Five of a kind"]
+
+
+def gx_dice_rank(dice) -> tuple:
+    """Comparable rank: (category, tie-break values…). Higher is better."""
+    cnt = Counter(dice)
+    groups = sorted(cnt.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
+    shape = sorted(cnt.values(), reverse=True)
+    tb = tuple(v for v, _ in groups)
+    if shape == [5]:
+        return (7,) + tb
+    if shape == [4, 1]:
+        return (6,) + tb
+    if shape == [3, 2]:
+        return (5,) + tb
+    if sorted(dice) in ([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]):
+        return (4, max(dice))
+    if shape == [3, 1, 1]:
+        return (3,) + tb
+    if shape == [2, 2, 1]:
+        return (2,) + tb
+    if shape == [2, 1, 1, 1]:
+        return (1,) + tb
+    return (0,) + tuple(sorted(dice, reverse=True))
+
+
+def gx_bot_holds(dice) -> list:
+    """Simple strategy: keep the biggest group (or a 4-run toward a straight); reroll the rest."""
+    cnt = Counter(dice)
+    best_v, best_n = max(cnt.items(), key=lambda kv: (kv[1], kv[0]))
+    pairs = sum(1 for n in cnt.values() if n == 2)
+    if best_n == 1 or (best_n == 2 and pairs == 1):   # a 4-run straight draw (1/3 to hit) beats a lone pair
+        for run in ((2, 3, 4, 5), (1, 2, 3, 4), (3, 4, 5, 6)):
+            if set(run) <= set(dice):
+                used, hold = set(), []
+                for d in dice:
+                    keep = d in run and d not in used
+                    if keep:
+                        used.add(d)
+                    hold.append(keep)
+                return hold
+        if best_n == 1:
+            return [d >= 5 for d in dice]
+    if gx_dice_rank(dice)[0] in (4, 5, 7):
+        return [True] * 5
+    return [d == best_v for d in dice]
+
+
+class _GXDiceView(_GXOwnedView):
+    def __init__(self, ctx, bet):
+        super().__init__(ctx.author.id, timeout=90)
+        self.ctx, self.bet = ctx, bet
+        self.dice = [_GX_RNG.randint(1, 6) for _ in range(5)]
+        self.hold = [False] * 5
+        self.over = False
+
+    def fmt(self, dice):
+        return " ".join(f"{_GX_DIE[d]}" for d in dice) + "  (" + " ".join(str(d) for d in dice) + ")"
+
+    def render(self, extra=""):
+        rank = gx_dice_rank(self.dice)
+        txt = (f"## 🎲 Dice Poker · bet {self.bet:,} 🪙\n**You:** {self.fmt(self.dice)} — *{_GX_HANDS[rank[0]]}*\n"
+               + ("Tap dice to **hold** them, then reroll once (or stand)." if not self.over else "") + (f"\n{extra}" if extra else ""))
+        if self.over:
+            return _gx_view(txt, C_GREEN if "won" in extra else C_GOLD if "Tie" in extra else C_DARKRED, owner_view=self)
+        dice_btns = []
+        for i, d in enumerate(self.dice):
+            b = discord.ui.Button(label=f"{d}", emoji="📌" if self.hold[i] else "🎲",
+                                  style=discord.ButtonStyle.primary if self.hold[i] else discord.ButtonStyle.secondary)
+            b.callback = self._toggle(i)
+            dice_btns.append(b)
+        rr = discord.ui.Button(label="Reroll", emoji="🔁", style=discord.ButtonStyle.success)
+        rr.callback = self._reroll
+        st = discord.ui.Button(label="Stand", emoji="✋", style=discord.ButtonStyle.secondary)
+        st.callback = self._stand
+        return _gx_view(txt, C_PURPLE, [dice_btns, [rr, st]], owner_view=self)
+
+    def _toggle(self, i):
+        async def cb(interaction):
+            if self.over:
+                return await interaction.response.defer()
+            self.hold[i] = not self.hold[i]
+            await interaction.response.edit_message(view=self.render())
+        return cb
+
+    async def _reroll(self, interaction):
+        if self.over:
+            return await interaction.response.defer()
+        self.dice = [d if h else _GX_RNG.randint(1, 6) for d, h in zip(self.dice, self.hold)]
+        await interaction.response.edit_message(view=self.finish())
+
+    async def _stand(self, interaction):
+        if self.over:
+            return await interaction.response.defer()
+        await interaction.response.edit_message(view=self.finish())
+
+    def finish(self):
+        self.over = True
+        bd = [_GX_RNG.randint(1, 6) for _ in range(5)]
+        hold = gx_bot_holds(bd)
+        bd = [d if h else _GX_RNG.randint(1, 6) for d, h in zip(bd, hold)]
+        me, them = gx_dice_rank(self.dice), gx_dice_rank(bd)
+        if me > them:
+            pay, res, won = self.bet * 2, f"🏆 You won **{self.bet * 2:,}** 🪙", True
+        elif me == them:
+            pay, res, won = self.bet, "🤝 Tie — bet returned", False
+        else:
+            pay, res, won = 0, f"💀 Bot wins — lost **{self.bet:,}** 🪙", False
+        _gx_pay(self.ctx.guild, self.ctx.author.id, pay)
+        _gx_stat(self.ctx.guild, self.ctx.author.id, "dicepoker", won)
+        _GX_ACTIVE.discard(("dice", self.ctx.author.id))
+        self.stop()
+        return self.render(f"**Bot:** {self.fmt(bd)} — *{_GX_HANDS[them[0]]}*\n{res}")
+
+    async def on_timeout(self):
+        if not self.over:
+            self.finish()
+
+
+@_gx_cmd("dicepoker", aliases=["dpoker", "dice5"], cooldown=(1, 4.0))
+async def cmd_gx_dicepoker(ctx, bet: str):
+    """,dicepoker <bet> — 5 dice vs the bot: hold, reroll once, best hand wins 2×"""
+    if ("dice", ctx.author.id) in _GX_ACTIVE:
+        raise commands.BadArgument("Finish your current dice game first.")
+    amount = _gx_take(ctx, bet)
+    _GX_ACTIVE.add(("dice", ctx.author.id))
+    await _gx_open(ctx, _GXDiceView(ctx, amount).render(), refund=amount, active_key=("dice", ctx.author.id))
+
+
+# ═════════════════════════ 🏅 PROFILE + OVERALL LEADERBOARD ═════════════════════════
+def gx_totals(stats: dict) -> tuple:
+    wins = sum(int(s.get("wins", 0)) for s in stats.values() if isinstance(s, dict))
+    plays = sum(int(s.get("plays", 0)) for s in stats.values() if isinstance(s, dict))
+    return wins, plays
+
+
+def gx_arcade_score(stats: dict) -> int:
+    """Wins count most, variety counts too, playing earns a little: rewards all-rounders, not grinders."""
+    wins, plays = gx_totals(stats)
+    variety = sum(1 for s in stats.values() if isinstance(s, dict) and s.get("plays"))
+    return wins * 10 + variety * 25 + plays
+
+
+@_gx_cmd("gameprofile", aliases=["gprofile", "gp", "arcadeprofile"], cooldown=(1, 5.0))
+async def cmd_gx_profile(ctx, member: discord.Member = None):
+    """,gameprofile [@user] — every game you've played, win rates, rank and arcade score"""
+    m = member or ctx.author
+    g = word_stats.get(str(ctx.guild.id), {})
+    stats = g.get(str(m.id), {})
+    if not stats:
+        raise commands.BadArgument(f"**{m.display_name}** hasn't played any arcade games yet — try `{ctx.prefix}games`.")
+    wins, plays = gx_totals(stats)
+    score = gx_arcade_score(stats)
+    board = sorted(((uid, gx_arcade_score(s)) for uid, s in g.items()), key=lambda t: -t[1])
+    rank = next((i + 1 for i, (uid, _) in enumerate(board) if uid == str(m.id)), None)
+    top = sorted(((k, s) for k, s in stats.items() if isinstance(s, dict) and s.get("plays")),
+                 key=lambda kv: (-kv[1].get("wins", 0), -kv[1].get("plays", 0)))
+    lines = []
+    for k, s in top[:10]:
+        rate = s["wins"] / s["plays"] * 100 if s["plays"] else 0
+        bar = "█" * round(rate / 10) + "░" * (10 - round(rate / 10))
+        lines.append(f"`{k[:11]:<11}` `{bar}` **{s['wins']}**/{s['plays']} ({rate:.0f}%)")
+    coins = get_wallet(ctx.guild.id, m.id)["coins"]
+    e = discord.Embed(title=f"🏅  {m.display_name}'s arcade profile", color=C_PURPLE, description=(
+        f"# {score:,} pts\nRank **#{rank}** of {len(board)} · **{wins}** wins / {plays} games "
+        f"({wins / plays * 100 if plays else 0:.0f}%) · {len(top)} different games · {coins:,} 🪙"))
+    e.set_thumbnail(url=m.display_avatar.url)
+    e.add_field(name="Games", value="\n".join(lines) or "—", inline=False)
+    e.set_footer(text="score = 10 × wins + 25 × games tried + games played")
+    await send_v2(ctx, e)
+
+
+@_gx_cmd("arcadelb", aliases=["arcadetop", "gametop"], cooldown=(1, 6.0))
+async def cmd_gx_arcadelb(ctx):
+    """,arcadelb — best all-round players across every arcade game"""
+    g = word_stats.get(str(ctx.guild.id), {})
+    board = sorted(((uid, gx_arcade_score(s), gx_totals(s)) for uid, s in g.items()), key=lambda t: -t[1])[:10]
+    if not board:
+        raise commands.BadArgument("Nobody has played yet — start with `" + ctx.prefix + "games`.")
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"{medals[i] if i < 3 else f'`{i + 1}.`'} <@{uid}> — **{sc:,}** pts · {w} wins / {p} games"
+             for i, (uid, sc, (w, p)) in enumerate(board)]
+    await send_v2(ctx, discord.Embed(title="🏆  Arcade — all-round leaderboard", description="\n".join(lines), color=C_GOLD))
+
+
+HELP_PAGES["arcade_pro"] = {
+    "label": "Arcade Pro", "emoji": "🚀",
+    "content": (
+        "## 🚀  Arcade Pro  ✨\n"
+        "`⟦P⟧crash <bet>` (`rocket`) — live multiplier, 💰 cash out before it explodes\n"
+        "`⟦P⟧towers <bet> [easy|normal|hard]` — climb 8 floors, dodge traps, cash out any time\n"
+        "`⟦P⟧c4bot [easy|normal|hard]` (`fourbot`) — four in a row vs an alpha-beta AI\n"
+        "`⟦P⟧lights [3-5]` — switch every light off · 🧠 hints from a GF(2) solver\n"
+        "`⟦P⟧dicepoker <bet>` (`dpoker`) — 5 dice vs the bot, hold & reroll once, 2× payout\n"
+        "`⟦P⟧gameprofile [@user]` (`gp`) — all your games, win rates, rank · `⟦P⟧arcadelb` — all-round leaderboard\n"
+        "-# Bets accept `500`, `2k`, `half`, `all`, `25%` · `⟦P⟧gamelb crash|towers|c4bot|lights|dicepoker` works too"
+    ),
+}
+for _sec in HELP_SECTIONS:
+    if _sec[0] == "games" and "arcade_pro" not in _sec[3]:
+        _sec[3].insert(0, "arcade_pro")
+HELP_CATEGORY_COLOR["arcade_pro"] = C_PINK
+HELP_CATEGORY_BLURB["arcade_pro"] = "crash, towers, four-in-a-row AI, lights puzzle, dice poker, profiles"
+HELP_NEW.add("arcade_pro")
+HELP_NEW.discard("arcade_plus")
+_COMMAND_META_CACHE = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

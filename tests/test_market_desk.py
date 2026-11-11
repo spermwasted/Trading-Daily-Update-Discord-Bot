@@ -32,7 +32,8 @@ def test_version_constants(bot_mod):
     builds = [e["build"] for e in bot_mod.BOT_CHANGELOG]
     assert builds == sorted(builds, reverse=True)
     assert bot_mod._vs_tuple("6.0.0") > bot_mod._vs_tuple("5.9.12")
-    assert bot_mod._vs_find("v6.0.0") is bot_mod.BOT_CHANGELOG[0]
+    assert bot_mod._vs_find("v" + bot_mod.BOT_VERSION) is bot_mod.BOT_CHANGELOG[0]
+    assert bot_mod._vs_find("6.0.0")["build"] == 48
     assert bot_mod._vs_find("bot-47")["build"] == 47
 
 
