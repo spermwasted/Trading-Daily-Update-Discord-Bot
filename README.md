@@ -1,8 +1,8 @@
 # Trading-Daily-Update-Discord-Bot
 
 All-in-one Discord bot (`bot.py`) — moderation, antinuke, games, economy, media tools — now
-**v6.1.0 "Turbo Shield" (build 49)** — antinuke engine v3, new arcade games, and the
-trading / daily-market-update system from 6.0.0.
+**v6.2.0 "Claude & Game Cards" (build 50)** — Claude-powered AI chat, game profile cards,
+a new Instagram profile card, plus antinuke engine v3, arcade games and the trading system.
 
 ## Run
 ```bash
@@ -31,6 +31,32 @@ Enable **Server Members** and **Message Content** intents in the Developer Porta
 Symbols: `AAPL`, `BTC`, `ETH`, `EURUSD`, `EUR/USD`, `GOLD`, `OIL`, `SPX`, `^GSPC`, `RELIANCE.NS` …
 Ranges: `1d 5d 1mo 3mo 6mo ytd 1y 2y 5y max`. Data: Yahoo Finance chart API, CoinGecko,
 alternative.me — no API keys. Not financial advice.
+
+## 🤖 AI chat (new in 6.2.0)
+Needs `pip install anthropic` and an API key in `ANTHROPIC_API_KEY` (or the key alone in `anthropic_key.txt`,
+which is git-ignored). Uses Claude Opus 5.5 with server-side refusal fallback, prompt caching and optional
+web search. Without a key the rest of the bot works normally and `,ai` explains what's missing.
+
+| Command | What it does |
+|---|---|
+| `,ai <question>` (`claude`, `chat`) | Ask anything; attach images to ask about them |
+| @mention / reply to the bot | Natural chat with per-channel memory (16 messages, resets after 3 h quiet) |
+| `,summarize [n]` (`tldr`) · `,explain` (reply) | Channel recap · explain a message, code or image |
+| `,ai channel [#ch]` · `web on\|off` · `effort low\|medium\|high` · `persona` · `limit <n>` · `on\|off` | Admin controls (Manage Server) |
+| `,ai reset` · `,ai stats` | Clear channel memory · 7-day usage |
+
+Defaults: effort `low` (fast and cheap for chat), web search on, 300 requests/server/day, 5 s per-user cooldown.
+
+## 🕹️ Game lookup (new in 6.2.0)
+| Command | Data source |
+|---|---|
+| `,valorant Name#TAG [region]` | HenrikDev API — set `HENRIKDEV_API_KEY` (free) |
+| `,valagent <agent>` | valorant-api.com (no key) |
+| `,fortnite <name>` | fortnite-api.com — set `FORTNITE_API_KEY` |
+| `,steam <game>` · `,chess <user>` · `,roblox <user>` · `,genshin <uid>` · `,freegames` | public APIs, no key |
+| `,bgmi` · `,cod` · `,freefire` `[@user]` · `set field=value` · `,gamercard` | self-reported cards (no public stats API exists for these games) |
+| `,gamenews <game>` | Claude + live web search |
+| `,igprofile <user>` / `,instagram profile <user>` | Instagram card: verified badge, bio, engagement rate, post rhythm, recent posts |
 
 ## ⚡ Antinuke engine v3 "Turbo" (new in 6.1.0)
 * **Faster:** compiled per-server config (O(1) hot path, µs decisions) · recovery starts in parallel with

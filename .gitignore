@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 logs/
 token.txt
+anthropic_key.txt
 *.json
 *.json.bak
 *.json.tmp
