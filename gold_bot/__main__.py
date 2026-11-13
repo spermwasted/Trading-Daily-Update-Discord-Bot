@@ -3,6 +3,8 @@
     python -m gold_bot                 run the Discord bot (needs DISCORD_BOT_TOKEN)
     python -m gold_bot --dry-run       build both reports from live market data and
                                        print the embeds as JSON (no Discord)
+    python -m gold_bot --send-now      build both reports and post them once to the
+                                       configured channel(s), then exit
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ def _setup_logging(level: str) -> None:
     logging.getLogger("discord").setLevel(logging.INFO)
 
 
-async def _dry_run(settings: Settings) -> int:
+async def _dry_run(settings: Settings, send: bool = False) -> int:
     from gold_bot.embeds import developing_embed, session_embed
     from gold_bot.reports import ReportBuilder
     from gold_bot.service import utc_now
@@ -36,12 +38,24 @@ async def _dry_run(settings: Settings) -> int:
     now = utc_now()
     try:
         print("Data source health:", json.dumps(await provider.health(), indent=2))
+        embeds = []
         daily = await builder.build_daily(now)
-        print(json.dumps(developing_embed(daily, settings.display_zone).to_dict(), indent=2, ensure_ascii=False))
+        embeds.append((settings.discord_daily_channel_id, developing_embed(daily, settings.display_zone)))
         occurrence = schedule.current(now) or schedule.latest_open(now)
         if occurrence:
             session = await builder.build_session(occurrence, now)
-            print(json.dumps(session_embed(session, settings.display_zone, "TRACKER").to_dict(), indent=2, ensure_ascii=False))
+            embeds.append((settings.session_channel, session_embed(session, settings.display_zone, "TRACKER")))
+        for _, embed in embeds:
+            print(json.dumps(embed.to_dict(), indent=2, ensure_ascii=False))
+        if send:
+            from gold_bot.rest_publisher import RestPublisher
+
+            publisher = RestPublisher(settings.discord_bot_token.get_secret_value())
+            try:
+                for channel, embed in embeds:
+                    print("Posted message", await publisher.send(channel, embed), "to channel", channel)
+            finally:
+                await publisher.aclose()
     except DataUnavailable as exc:
         print(f"{settings.source_name} data unavailable: {exc}")
         return 1
@@ -53,6 +67,7 @@ async def _dry_run(settings: Settings) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="GOLD market intelligence Discord bot")
     parser.add_argument("--dry-run", action="store_true", help="print reports from live market data, no Discord")
+    parser.add_argument("--send-now", action="store_true", help="post the current reports once and exit")
     args = parser.parse_args()
 
     settings = Settings()
@@ -72,6 +87,8 @@ def main() -> int:
     if not settings.discord_daily_channel_id:
         logging.error("DISCORD_DAILY_CHANNEL_ID is not set")
         return 2
+    if args.send_now:
+        return asyncio.run(_dry_run(settings, send=True))
 
     from gold_bot.bot import DiscordPublisher, GoldBot
     from gold_bot.service import ReportService

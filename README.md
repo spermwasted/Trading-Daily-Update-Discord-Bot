@@ -17,8 +17,18 @@ It is **market data and analysis only** – no orders are ever created.
 
 | `DATA_PROVIDER` | Source | Account needed |
 |---|---|---|
-| `oanda` (default) | OANDA v20 REST API, XAU_USD **bid** candles | Free OANDA practice (demo) account + API token |
+| `twelvedata` (default) | Twelve Data `time_series` API, XAU/USD | Free API key (email sign-up only) |
+| `oanda` | OANDA v20 REST API, XAU_USD **bid** candles | OANDA practice (demo) account + API token |
 | `fxcm` | FXCM ForexConnect via the `fxcm_bridge` service | FXCM Trading Station login |
+
+**Twelve Data** gives 5-minute and 1-hour candles; the bot builds 15M from 5M and
+4H / Daily from 1H itself, on FXCM's boundaries (daily 17:00 → 17:00 New York, 4H at
+17:00, 21:00, 01:00, 05:00, 09:00, 13:00 NY), so candle *timing* matches the FXCM chart.
+Prices are Twelve Data's aggregated XAU/USD quotes, so levels can differ from FXCM by a
+few cents. To stay inside the free plan (800 credits/day, 8/minute) the bot loads history
+once at start-up and then fetches only the newest 5-minute candles every 150 s (every
+20 s for 4 minutes after each session open and the daily open; every 30 min at weekends),
+about 650 credits per trading day. "Current price" is the latest 5-minute close.
 
 **How close is OANDA to the FXCM chart?** The candle *structure* is the same: OANDA
 candles are requested with `dailyAlignment=17` and `alignmentTimezone=America/New_York`,
@@ -32,8 +42,10 @@ embed footer states the data source.
 ## Architecture
 
 ```
-gold_bot/data/          data layer (only place that talks to a broker)
-  oanda.py              OANDA v20 REST provider (default)
+gold_bot/data/          data layer (only place that talks to a data source)
+  twelvedata.py         Twelve Data provider with credit-saving cache (default)
+  aggregate.py          builds 15M / 4H / Daily candles on FXCM boundaries
+  oanda.py              OANDA v20 REST provider
   bridge_client.py      client for fxcm_bridge/ (DATA_PROVIDER=fxcm)
 gold_bot/analysis/      pure functions: bias, premium/discount, FVGs, sessions
 gold_bot/reports.py     builds report data from candles
@@ -76,11 +88,10 @@ fxcm_bridge/            optional Python 3.7 ForexConnect service (FXCM only)
 All secrets are environment variables in a `.env` file on the server (never committed);
 see [`.env.example`](.env.example).
 
-1. **OANDA practice account and API token**
-   * Sign up for a free practice (demo) account on oanda.com.
-   * Log in → *My Account* / profile → **Manage API Access** → **Generate** a token.
-   * `.env`: `OANDA_API_TOKEN=<token>`, `OANDA_ENVIRONMENT=practice`.
-     `OANDA_ACCOUNT_ID` is optional (the token's first account is used).
+1. **Twelve Data API key** – sign up with your email at twelvedata.com (confirm the
+   email), then Dashboard → **API Keys** → copy the key → `.env`: `TWELVEDATA_API_KEY=<key>`.
+   (For OANDA instead: `DATA_PROVIDER=oanda`, `OANDA_API_TOKEN=<token>` from the practice
+   account's *Manage API Access* page.)
 2. **Discord bot token** – Discord Developer Portal → your application → **Bot** →
    **Reset Token** → copy (not the Client Secret, Application ID or Public Key). Invite the
    bot with the `bot` and `applications.commands` scopes and *Send Messages* + *Embed Links*.
@@ -103,12 +114,14 @@ cd Trading-Daily-Update-Discord-Bot
 
 # 3. Configure secrets
 cp .env.example .env
-nano .env            # OANDA_API_TOKEN, DISCORD_BOT_TOKEN, DISCORD_DAILY_CHANNEL_ID
+nano .env            # TWELVEDATA_API_KEY, DISCORD_BOT_TOKEN, DISCORD_DAILY_CHANNEL_ID
 chmod 600 .env
 
 # 4. Build and preview the reports from live data without posting to Discord
 docker compose build
 docker compose run --rm bot python -m gold_bot --dry-run
+#    ...or post one test report to your channel right now:
+docker compose run --rm bot python -m gold_bot --send-now
 
 # 5. Start (restarts automatically after crashes and reboots)
 docker compose up -d
@@ -141,5 +154,6 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 Tests cover daily bias, both liquidity sweeps, premium/discount, bullish/bearish FVG
 detection, partial and full mitigation, all three session triggers, DST transitions,
-duplicate-report prevention (including restarts), data-provider failures, the OANDA
-client (request parameters, bid parsing, retries) and FXCM reconnection.
+duplicate-report prevention (including restarts), data-provider failures, 4H/Daily candle
+building on FXCM boundaries, the Twelve Data cache (credit use, back-off), the OANDA
+client and FXCM reconnection.

@@ -25,8 +25,14 @@ class Settings(BaseSettings):
     discord_session_channel_id: int = 0  # 0 = same as the daily channel
     discord_guild_id: int = 0  # optional: instant slash-command sync to one server
 
-    # Market data: "oanda" (OANDA v20 REST, default) or "fxcm" (ForexConnect bridge)
-    data_provider: str = "oanda"
+    # Market data: "twelvedata" (default), "oanda" (OANDA v20 REST) or "fxcm" (ForexConnect bridge)
+    data_provider: str = "twelvedata"
+    twelvedata_api_key: SecretStr = Field(default=SecretStr(""))
+    twelvedata_symbol: str = "XAU/USD"
+    twelvedata_digits: int = 2
+    twelvedata_refresh_seconds: int = 150  # normal refresh (free plan: 800 credits/day)
+    twelvedata_fast_refresh_seconds: int = 20  # right after session opens / daily open
+    twelvedata_fast_window_minutes: int = 4
     oanda_api_token: SecretStr = Field(default=SecretStr(""))
     oanda_account_id: str = ""  # optional: first account of the token is used
     oanda_environment: str = "practice"  # practice (demo) or live
@@ -75,8 +81,8 @@ class Settings(BaseSettings):
     @classmethod
     def _check_provider(cls, value: str) -> str:
         value = value.strip().lower()
-        if value not in ("oanda", "fxcm"):
-            raise ValueError("DATA_PROVIDER must be 'oanda' or 'fxcm'")
+        if value not in ("twelvedata", "oanda", "fxcm"):
+            raise ValueError("DATA_PROVIDER must be 'twelvedata', 'oanda' or 'fxcm'")
         return value
 
     @field_validator("session_asia_open", "session_london_open", "session_newyork_open", "session_newyork_close")
@@ -95,11 +101,14 @@ class Settings(BaseSettings):
 
     @property
     def display_symbol(self) -> str:
-        return self.oanda_instrument.replace("_", "/") if self.data_provider == "oanda" else self.fxcm_symbol
+        return {
+            "twelvedata": self.twelvedata_symbol,
+            "oanda": self.oanda_instrument.replace("_", "/"),
+        }.get(self.data_provider, self.fxcm_symbol)
 
     @property
     def source_name(self) -> str:
-        return "OANDA" if self.data_provider == "oanda" else "FXCM"
+        return {"twelvedata": "Twelve Data", "oanda": "OANDA"}.get(self.data_provider, "FXCM")
 
     @property
     def session_channel(self) -> int:

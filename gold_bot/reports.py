@@ -79,7 +79,7 @@ class ReportBuilder:
     async def current_price(self, fallback: Candle | None) -> tuple[Price | None, float, str]:
         try:
             price = await self.provider.get_price()
-            return price, price.value, f"{self.settings.source_name} live bid"
+            return price, price.value, f"latest {self.settings.source_name} price"
         except DataUnavailable:
             if fallback is None:
                 raise

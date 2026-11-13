@@ -77,7 +77,7 @@ def _fvg_block(gaps: list[FVG], price: float, digits: int, limit: int) -> str:
 
 
 def _footer(embed: discord.Embed, text: str, source: str, now: datetime, tz: ZoneInfo) -> None:
-    embed.set_footer(text=f"{text} • Data: {source} bid • {fmt_local(now, tz)}")
+    embed.set_footer(text=f"{text} • Data: {source} • {fmt_local(now, tz)}")
     embed.timestamp = now
 
 
