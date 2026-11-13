@@ -128,6 +128,9 @@ docker compose up -d
 docker compose logs -f
 ```
 
+Without slash commands (lighter, REST-only posting), change the bot's command to
+`python -m gold_bot --no-gateway`; the automated reports are identical.
+
 Operations: `docker compose ps`, `docker compose logs -f bot`, `/gold status` in Discord.
 Update with `git pull && docker compose up -d --build`. The SQLite database lives in the
 `bot-data` volume.
@@ -156,4 +159,4 @@ Tests cover daily bias, both liquidity sweeps, premium/discount, bullish/bearish
 detection, partial and full mitigation, all three session triggers, DST transitions,
 duplicate-report prevention (including restarts), data-provider failures, 4H/Daily candle
 building on FXCM boundaries, the Twelve Data cache (credit use, back-off), the OANDA
-client and FXCM reconnection.
+client, FXCM reconnection, Discord REST posting and the `/gold` slash commands.

@@ -84,15 +84,17 @@ def _footer(embed: discord.Embed, text: str, source: str, now: datetime, tz: Zon
 def daily_embed(report: DailyReport, tz: ZoneInfo, max_per_side: int = 6) -> discord.Embed:
     d = report.digits
     bias = report.bias
-    trade_day = trading_date(report.trading_day_start)
-    embed = discord.Embed(
-        title=f"{report.brand} | DAILY MARKET ANALYSIS",
-        description=(
-            f"**{report.instrument}** · trading day **{trade_day:%a %d %b %Y}** "
+    if report.daily_open is None:  # no new daily candle yet (weekend / before the reopen)
+        description = (
+            f"**{report.instrument}** · market closed · last completed trading day "
+            f"**{trading_date(report.previous_day.time):%a %d %b %Y}**"
+        )
+    else:
+        description = (
+            f"**{report.instrument}** · trading day **{trading_date(report.trading_day_start):%a %d %b %Y}** "
             f"(opened {fmt_local(report.trading_day_start, tz)})"
-        ),
-        color=bias_color(bias),
-    )
+        )
+    embed = discord.Embed(title=f"{report.brand} | DAILY MARKET ANALYSIS", description=description, color=bias_color(bias))
 
     if bias is not None:
         confirmation = f"{bias.signal.short}\n> {bias.signal.value}"
@@ -100,6 +102,7 @@ def daily_embed(report: DailyReport, tz: ZoneInfo, max_per_side: int = 6) -> dis
     else:
         confirmation, ref = "Unconfirmed", "—"
     prev = report.previous_day
+    daily_open = f"`{fmt(report.daily_open, d)}`" if report.daily_open is not None else "not open yet"
     embed.add_field(
         name="📊 DAILY MARKET BIAS",
         value=(
@@ -107,7 +110,7 @@ def daily_embed(report: DailyReport, tz: ZoneInfo, max_per_side: int = 6) -> dis
             f"• Previous Day High: `{fmt(prev.high, d)}`\n"
             f"• Previous Day Low: `{fmt(prev.low, d)}`\n"
             f"• Previous Day Close: `{fmt(prev.close, d)}`\n"
-            f"• Daily Open: `{fmt(report.daily_open, d)}`\n"
+            f"• Daily Open: {daily_open}\n"
             f"• Confirmation: {confirmation}\n"
             f"• Based on completed candle {trading_date(prev.time):%a %d %b} {ref}\n{SEPARATOR}"
         )[:FIELD_LIMIT],

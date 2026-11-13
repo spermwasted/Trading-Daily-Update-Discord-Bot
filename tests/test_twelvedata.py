@@ -132,3 +132,10 @@ def test_bad_key_raises_without_retries():
     with pytest.raises(DataUnavailable):
         asyncio.run(p.get_candles(Timeframe.M5, count=1))
     assert len(requests) == 1
+
+
+def test_price_precision_is_read_from_the_data():
+    from gold_bot.data.twelvedata import price_decimals
+
+    assert price_decimals([{"open": "4092.41000", "high": "4093.5", "low": "4091.115", "close": "4092"}]) == 3
+    assert price_decimals([{"open": "1.10606", "high": "1.1062", "low": "1.1", "close": "1.10603"}]) == 5

@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     data_provider: str = "twelvedata"
     twelvedata_api_key: SecretStr = Field(default=SecretStr(""))
     twelvedata_symbol: str = "XAU/USD"
-    twelvedata_digits: int = 2
+    twelvedata_digits: int = 0  # 0 = detect the quote precision from the data
     twelvedata_refresh_seconds: int = 150  # normal refresh (free plan: 800 credits/day)
     twelvedata_fast_refresh_seconds: int = 20  # right after session opens / daily open
     twelvedata_fast_window_minutes: int = 4

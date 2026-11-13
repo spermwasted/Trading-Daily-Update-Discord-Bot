@@ -95,10 +95,10 @@ def test_server_errors_are_retried():
     assert len(calls) == 3
 
 
-def test_inconsistent_ohlc_is_rejected():
+def test_inconsistent_ohlc_is_widened_to_its_own_open_close():
     def handler(request):
         return httpx.Response(200, json={"candles": [{"time": "2026-11-09T22:00:00.000000000Z", "volume": 1,
                                                       "bid": {"o": "10", "h": "9", "l": "8", "c": "9.5"}}]})
 
-    with pytest.raises(DataUnavailable):
-        asyncio.run(make(handler, account_id="x").get_candles(Timeframe.D1, count=1))
+    (candle,) = asyncio.run(make(handler, account_id="x").get_candles(Timeframe.D1, count=1))
+    assert (candle.open, candle.high, candle.low, candle.close) == (10, 10, 8, 9.5)

@@ -198,15 +198,15 @@ def test_bridge_client_retries_then_raises_data_unavailable():
     assert calls["n"] == 3
 
 
-def test_bridge_client_parses_candles_and_rejects_bad_ohlc():
+def test_bridge_client_parses_candles_and_repairs_bad_ohlc():
     good = {"candles": [{"time": "2026-11-09T22:00:00Z", "open": 4100, "high": 4120, "low": 4090, "close": 4110}]}
     bad = {"candles": [{"time": "2026-11-09T22:00:00Z", "open": 4100, "high": 4095, "low": 4090, "close": 4110}]}
     for payload, ok in ((good, True), (bad, False)):
         client = BridgeClient("http://bridge", retry_delay=0,
                               transport=httpx.MockTransport(lambda r, p=payload: httpx.Response(200, json=p)))
+        candles = asyncio.run(client.get_candles(Timeframe.D1, count=1))
+        assert candles[0].time.tzinfo is not None
         if ok:
-            candles = asyncio.run(client.get_candles(Timeframe.D1, count=1))
-            assert candles[0].high == 4120 and candles[0].time.tzinfo is not None
-        else:
-            with pytest.raises(DataUnavailable):
-                asyncio.run(client.get_candles(Timeframe.D1, count=1))
+            assert candles[0].high == 4120
+        else:  # reported high 4095 is below the bar's own close 4110 -> widened to 4110
+            assert (candles[0].high, candles[0].low) == (4110, 4090)

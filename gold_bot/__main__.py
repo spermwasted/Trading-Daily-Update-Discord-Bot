@@ -1,6 +1,8 @@
 """Entry point.
 
-    python -m gold_bot                 run the Discord bot (needs DISCORD_BOT_TOKEN)
+    python -m gold_bot                 run the Discord bot: automated reports + /gold commands
+    python -m gold_bot --no-gateway    automated reports only, posted via Discord's REST API
+                                       (no gateway connection, no slash commands)
     python -m gold_bot --dry-run       build both reports from live market data and
                                        print the embeds as JSON (no Discord)
     python -m gold_bot --send-now      build both reports and post them once to the
@@ -16,7 +18,7 @@ import sys
 
 from gold_bot.analysis.sessions import SessionSchedule
 from gold_bot.config import Settings
-from gold_bot.data.factory import ConfigurationError, make_provider
+from gold_bot.data.factory import ConfigurationError, make_provider, validate_provider_settings
 from gold_bot.data.provider import DataUnavailable
 from gold_bot.storage import Storage
 
@@ -24,6 +26,8 @@ from gold_bot.storage import Storage
 def _setup_logging(level: str) -> None:
     logging.basicConfig(level=level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("discord").setLevel(logging.INFO)
+    # httpx logs every request URL at INFO; keep logs readable.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def _dry_run(settings: Settings, send: bool = False) -> int:
@@ -54,6 +58,9 @@ async def _dry_run(settings: Settings, send: bool = False) -> int:
             try:
                 for channel, embed in embeds:
                     print("Posted message", await publisher.send(channel, embed), "to channel", channel)
+            except Exception as exc:  # noqa: BLE001
+                print(f"Discord rejected the message: {exc}")
+                return 1
             finally:
                 await publisher.aclose()
     except DataUnavailable as exc:
@@ -64,16 +71,35 @@ async def _dry_run(settings: Settings, send: bool = False) -> int:
     return 0
 
 
+async def _run_without_gateway(settings: Settings) -> int:
+    from gold_bot.rest_publisher import RestPublisher
+    from gold_bot.service import ReportService
+
+    provider = make_provider(settings)
+    storage = Storage(settings.database_path)
+    schedule = SessionSchedule(settings.session_times(), settings.session_zone)
+    publisher = RestPublisher(settings.discord_bot_token.get_secret_value())
+    service = ReportService(settings, provider, storage, publisher, schedule)
+    try:
+        await service.run_forever()
+    finally:
+        await publisher.aclose()
+        await provider.aclose()
+        storage.close()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="GOLD market intelligence Discord bot")
     parser.add_argument("--dry-run", action="store_true", help="print reports from live market data, no Discord")
     parser.add_argument("--send-now", action="store_true", help="post the current reports once and exit")
+    parser.add_argument("--no-gateway", action="store_true", help="automated reports via REST only (no slash commands)")
     args = parser.parse_args()
 
     settings = Settings()
     _setup_logging(settings.log_level)
     try:
-        make_provider(settings)  # validate provider configuration early
+        validate_provider_settings(settings)
     except ConfigurationError as exc:
         logging.error("%s", exc)
         return 2
@@ -89,6 +115,11 @@ def main() -> int:
         return 2
     if args.send_now:
         return asyncio.run(_dry_run(settings, send=True))
+    if args.no_gateway:
+        try:
+            return asyncio.run(_run_without_gateway(settings))
+        except KeyboardInterrupt:
+            return 0
 
     from gold_bot.bot import DiscordPublisher, GoldBot
     from gold_bot.service import ReportService
