@@ -101,38 +101,54 @@ see [`.env.example`](.env.example).
 
 ## Deploying on an always-on server
 
-Any small Linux VPS (1 vCPU / 1 GB RAM) with outbound HTTPS.
+The bot must run on a computer that is always on. A small Linux VPS (Ubuntu 22.04/24.04,
+1 vCPU / 1 GB RAM) is ideal. Run only **one** copy of the bot at a time.
+
+**Quick setup (recommended)** – log in to the server (`ssh root@YOUR_SERVER_IP`), then:
 
 ```bash
-# 1. Install Docker (Ubuntu/Debian)
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER && newgrp docker
-
-# 2. Get the code
-git clone https://github.com/spermwasted/Trading-Daily-Update-Discord-Bot.git
+apt-get update && apt-get install -y git
+git clone -b claude/gold-fxcm-cloud-setup-tc49th https://github.com/spermwasted/Trading-Daily-Update-Discord-Bot.git
 cd Trading-Daily-Update-Discord-Bot
+sudo bash deploy/install.sh
+```
 
-# 3. Configure secrets
-cp .env.example .env
-nano .env            # TWELVEDATA_API_KEY, DISCORD_BOT_TOKEN, DISCORD_DAILY_CHANNEL_ID
+`deploy/install.sh` installs Docker, asks for your Twelve Data key, Discord bot token,
+channel ID and (optional) server ID, saves them in `.env` (readable by root only), checks
+that live gold data loads, and starts the bot. It restarts automatically after crashes
+and reboots. Run it again any time to change a key.
+
+**Manual setup** (same result):
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+cp .env.example .env && nano .env   # TWELVEDATA_API_KEY, DISCORD_BOT_TOKEN, DISCORD_DAILY_CHANNEL_ID
 chmod 600 .env
-
-# 4. Build and preview the reports from live data without posting to Discord
 docker compose build
-docker compose run --rm bot python -m gold_bot --dry-run
-#    ...or post one test report to your channel right now:
-docker compose run --rm bot python -m gold_bot --send-now
+docker compose run --rm bot python -m gold_bot --dry-run    # preview from live data, posts nothing
+docker compose run --rm bot python -m gold_bot --send-now   # optional: post one test report now
+docker compose up -d                                        # start
+docker compose logs -f bot
+```
 
-# 5. Start (restarts automatically after crashes and reboots)
-docker compose up -d
-docker compose logs -f
+**Windows PC instead of a server** (runs only while the PC is on and awake): install
+Python 3.12 from python.org (tick "Add python.exe to PATH"), download this branch as a ZIP
+from GitHub and unzip it, then in a terminal opened in that folder:
+
+```bat
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+copy .env.example .env
+notepad .env
+.venv\Scripts\python -m gold_bot --dry-run
+.venv\Scripts\python -m gold_bot
 ```
 
 Without slash commands (lighter, REST-only posting), change the bot's command to
 `python -m gold_bot --no-gateway`; the automated reports are identical.
 
 Operations: `docker compose ps`, `docker compose logs -f bot`, `/gold status` in Discord.
-Update with `git pull && docker compose up -d --build`. The SQLite database lives in the
+Update with `git pull && docker compose up -d --build bot`. The SQLite database lives in the
 `bot-data` volume.
 
 ### Using FXCM instead
